@@ -1,0 +1,130 @@
+# ------------------------------------
+# Python
+# ------------------------------------
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+.eggs/
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+*.log
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+.venv*/
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb_convert
+
+# Byte-compiled / optimized / DLL files
+*.dll
+*.pdb
+
+# ------------------------------------
+# Data & Models
+# ------------------------------------
+data/raw/
+data/processed/
+models/
+*.tar.gz
+*.pt
+*.h5
+*.onnx
+*.ckpt
+
+# Large dataset archives
+*.zip
+*.gz
+*.bz2
+*.xz
+
+# ------------------------------------
+# AWS / SageMaker
+# ------------------------------------
+*.json
+*.csv
+*.yml
+*.yaml
+
+# SageMaker local mode
+sm_model_dir/
+sm_output/
+output/
+*.npy
+*.npz
+
+# AWS credentials (never commit)
+.aws/
+*.pem
+
+# ------------------------------------
+# Terraform
+# ------------------------------------
+*.tfstate
+*.tfstate.*
+*.terraform/
+.terraform.lock.hcl
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# ------------------------------------
+# Docker
+# ------------------------------------
+*.dockerfile
+docker/*.log
+.dockerignore
+
+# ------------------------------------
+# VSCode / IDE
+# ------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# ------------------------------------
+# OS-specific
+# ------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+
+
+# Terraform
+terraform/:
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
