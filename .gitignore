@@ -1,7 +1,8 @@
+cat > .gitignore << 'EOF'
 # ------------------------------------
 # Python
 # ------------------------------------
-__pycache__/
+**pycache**/
 *.py[cod]
 *.so
 *.egg
@@ -12,7 +13,6 @@ __pycache__/
 *.db
 *.sqlite3
 *.log
-
 # Virtual environments
 .env
 .venv
@@ -20,15 +20,12 @@ env/
 venv/
 ENV/
 .venv*/
-
 # Jupyter notebooks
 .ipynb_checkpoints/
 *.ipynb_convert
-
 # Byte-compiled / optimized / DLL files
 *.dll
 *.pdb
-
 # ------------------------------------
 # Data & Models
 # ------------------------------------
@@ -40,32 +37,35 @@ models/
 *.h5
 *.onnx
 *.ckpt
-
 # Large dataset archives
 *.zip
 *.gz
 *.bz2
 *.xz
-
 # ------------------------------------
 # AWS / SageMaker
 # ------------------------------------
 *.json
 *.csv
-*.yml
-*.yaml
-
 # SageMaker local mode
 sm_model_dir/
 sm_output/
 output/
 *.npy
 *.npz
-
 # AWS credentials (never commit)
 .aws/
 *.pem
-
+# ------------------------------------
+# YAML files (but allow GitHub workflows)
+# ------------------------------------
+*.yml
+*.yaml
+# Allow GitHub workflows (exception to above)
+!.github/
+!.github/workflows/
+!.github/workflows/*.yml
+!.github/workflows/*.yaml
 # ------------------------------------
 # Terraform
 # ------------------------------------
@@ -78,14 +78,12 @@ override.tf
 override.tf.json
 *_override.tf
 *_override.tf.json
-
 # ------------------------------------
 # Docker
 # ------------------------------------
 *.dockerfile
 docker/*.log
 .dockerignore
-
 # ------------------------------------
 # VSCode / IDE
 # ------------------------------------
@@ -95,36 +93,11 @@ docker/*.log
 *.swo
 *.bak
 *.tmp
-
 # ------------------------------------
 # OS-specific
 # ------------------------------------
 .DS_Store
 Thumbs.db
 desktop.ini
+EOF
 
-
-# Terraform
-terraform/:
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-.terraform.lock.hcl
