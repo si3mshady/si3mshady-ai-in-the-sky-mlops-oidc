@@ -29,7 +29,7 @@ env:
   TRAIN_ECR_REPOSITORY: urbansound-train
   INFER_ECR_REPOSITORY: urbansound-infer
   SAGEMAKER_EXECUTION_ROLE_ARN: arn:aws:iam::564230509626:role/urbansound-sagemaker-execution
-  OIDC_ROLE_ARN: arn:aws:iam::564230509626:role/urbansound-github-actions
+  OIDC_ROLE_ARN:  arn:aws:iam::564230509626:role/urbansound-github-actions-v2
   ENDPOINT_NAME_BASE: urbansound-audio
   PYTHON_VERSION: "3.11"
 
