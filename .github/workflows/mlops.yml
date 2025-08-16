@@ -1,4 +1,4 @@
-name: UrbanSound • SageMaker OIDC MLOps (CNN)
+name: UrbanSound • SageMaker OIDC MLOps
 
 on:
   push:
@@ -17,92 +17,131 @@ on:
         options: [staging, production]
       train_instance_type:
         description: "SageMaker Training InstanceType"
-        default: "ml.m5.large"   # CPU by default; change to ml.g4dn.xlarge if you want GPU training
+        default: "ml.m5.large"
       serve_instance_type:
         description: "Endpoint InstanceType"
-        default: "ml.g4dn.xlarge"  # requested
+        default: "ml.g4dn.xlarge"
 
 env:
   AWS_REGION: us-east-2
+  AWS_ACCOUNT_ID: "564230509626"
+  S3_BUCKET: urbansound-mlops-56423506
   TRAIN_ECR_REPOSITORY: urbansound-train
   INFER_ECR_REPOSITORY: urbansound-infer
-  S3_BUCKET: urbansound-mlops-56423506
   SAGEMAKER_EXECUTION_ROLE_ARN: arn:aws:iam::564230509626:role/urbansound-sagemaker-execution
   OIDC_ROLE_ARN: arn:aws:iam::564230509626:role/urbansound-github-actions
   ENDPOINT_NAME_BASE: urbansound-audio
   PYTHON_VERSION: "3.11"
-  DOCKER_BUILDKIT: "1"
 
 permissions:
   id-token: write
   contents: read
 
+concurrency:
+  group: mlops-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   build-and-push-images:
+    name: Build & Push (ECR)
     runs-on: ubuntu-latest
     outputs:
-      train-image-uri: ${{ steps.push-train.outputs.TRAIN_IMAGE_URI }}
-      infer-image-uri: ${{ steps.push-infer.outputs.INFER_IMAGE_URI }}
+      train-image-uri: ${{ steps.out-train.outputs.TRAIN_IMAGE_URI }}
+      infer-image-uri: ${{ steps.out-infer.outputs.INFER_IMAGE_URI }}
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: aws-actions/configure-aws-credentials@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Ensure we use BuildKit/buildx + cache to keep builds fast/slim
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: ECR Login
         id: ecr
-      
-      - name: Build + Push TRAIN image
-        id: push-train
-        env:
-          ECR: 564230509626.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}
-          TAG: ${{ github.sha }}
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build & Push TRAIN image
+        id: build-train
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/training/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+
+      - name: Build & Push INFER image
+        id: build-infer
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/inference/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+
+      - name: Output Train URI
+        id: out-train
         run: |
-          docker build -t "$ECR:$TAG" -f docker/training/Dockerfile .
-          docker push "$ECR:$TAG"
-          echo "TRAIN_IMAGE_URI=$ECR:$TAG" >> $GITHUB_OUTPUT
-      
-      - name: Build + Push INFER image
-        id: push-infer
-        env:
-          ECR: 564230509626.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}
-          TAG: ${{ github.sha }}
+          echo "TRAIN_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+
+      - name: Output Infer URI
+        id: out-infer
         run: |
-          docker build -t "$ECR:$TAG" -f docker/inference/Dockerfile .
-          docker push "$ECR:$TAG"
-          echo "INFER_IMAGE_URI=$ECR:$TAG" >> $GITHUB_OUTPUT
+          echo "INFER_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
   sagemaker-train-and-deploy:
+    name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-python@v5
-        with: 
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
           python-version: ${{ env.PYTHON_VERSION }}
-      
-      - run: pip install boto3 botocore pyyaml
-      
-      - uses: aws-actions/configure-aws-credentials@v4
+
+      - name: Install deps for control script
+        run: pip install boto3 botocore pyyaml
+
+      - name: Configure AWS (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
-      
-      - name: Launch SageMaker training & deploy endpoint
+
+      - name: Train + (Re)Deploy Endpoint
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
-          TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.train-image-uri }}
-          INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.infer-image-uri }}
           S3_BUCKET: ${{ env.S3_BUCKET }}
           SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
+          TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.train-image-uri }}
+          INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.infer-image-uri }}
           ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
           FORCE_RETRAIN: ${{ inputs.force_retrain || 'false' }}
           INSTANCE_TYPE: ${{ inputs.train_instance_type }}
-          ENDPOINT_ENV: ${{ inputs.endpoint_env }}
           SERVE_INSTANCE_TYPE: ${{ inputs.serve_instance_type }}
+          ENDPOINT_ENV: ${{ inputs.endpoint_env }}
           GIT_SHA: ${{ github.sha }}
         run: python scripts/sm_train_and_deploy.py
 
