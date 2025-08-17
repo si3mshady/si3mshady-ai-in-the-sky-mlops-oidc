@@ -1,7 +1,7 @@
 name: UrbanSound • SageMaker OIDC MLOps
 
 permissions:
-  id-token: write
+  id-token: write    # grant OIDC token write
   contents: read
 
 on:
@@ -49,11 +49,9 @@ jobs:
       train-image-uri: ${{ steps.out-train.outputs.TRAIN_IMAGE_URI }}
       infer-image-uri: ${{ steps.out-infer.outputs.INFER_IMAGE_URI }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -62,12 +60,10 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - name: ECR Login
-        id: ecr
+      - id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build & Push TRAIN image
-        id: build-train
+      - id: build-train
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -82,8 +78,7 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
 
-      - name: Build & Push INFER image
-        id: build-infer
+      - id: build-infer
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -99,30 +94,22 @@ jobs:
             GIT_SHA=${{ github.sha }}
 
       - name: Output Train URI
-        id: out-train
-        run: |
-          echo "TRAIN_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+        run: echo "TRAIN_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Output Infer URI
-        id: out-infer
-        run: |
-          echo "INFER_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
+        run: echo "INFER_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
   sagemaker-train-and-deploy:
     name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
+      - uses: actions/setup-python@v5
+        with: python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install deps for control script
-        run: pip install boto3 botocore pyyaml
+      - run: pip install boto3 botocore pyyaml
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -131,17 +118,17 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - name: Train + (Re)Deploy Endpoint
-        env:
-          AWS_REGION: ${{ env.AWS_REGION }}
-          S3_BUCKET: ${{ env.S3_BUCKET }}
-          SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
-          TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.train-image-uri }}
-          INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.infer-image-uri }}
-          ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
-          FORCE_RETRAIN: ${{ inputs.force_retrain || 'false' }}
-          INSTANCE_TYPE: ${{ inputs.train_instance_type }}
-          SERVE_INSTANCE_TYPE: ${{ inputs.serve_instance_type }}
-          ENDPOINT_ENV: ${{ inputs.endpoint_env }}
-          GIT_SHA: ${{ github.sha }}
-        run: python scripts/sm_train_and_deploy.py
+      - run: |
+          python scripts/sm_train_and_deploy.py \
+            --region ${{ env.AWS_REGION }} \
+            --bucket ${{ env.S3_BUCKET }} \
+            --execution-role ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }} \
+            --train-image-uri ${{ needs.build-and-push-images.outputs.train-image-uri }} \
+            --infer-image-uri ${{ needs.build-and-push-images.outputs.infer-image-uri }} \
+            --endpoint-base ${{ env.ENDPOINT_NAME_BASE }} \
+            --force-retrain ${{ inputs.force_retrain }} \
+            --train-instance ${{ inputs.train_instance_type }} \
+            --serve-instance ${{ inputs.serve_instance_type }} \
+            --env ${{ inputs.endpoint_env }} \
+            --git-sha ${{ github.sha }}
+
