@@ -82,9 +82,9 @@ data "aws_iam_policy_document" "sm_policy" {
     resources = [aws_s3_bucket.artifacts.arn]
   }
   statement {
-    sid       = "S3RW"
-    effect    = "Allow"
-    actions   = ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"]
+    sid     = "S3RW"
+    effect  = "Allow"
+    actions = ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"]
     resources = ["${aws_s3_bucket.artifacts.arn}/*"]
   }
   statement {
@@ -111,8 +111,8 @@ resource "aws_iam_role_policy_attachment" "sm_attach" {
 
 # GitHub OIDC provider with correct thumbprints
 resource "aws_iam_openid_connect_provider" "github" {
-  url             = "https://token.actions.githubusercontent.com"
-  client_id_list  = ["sts.amazonaws.com"]
+  url            = "https://token.actions.githubusercontent.com"
+  client_id_list = ["sts.amazonaws.com"]
   thumbprint_list = [
     "6938fd4d98bab03faadb97b34396831e3780aea1",
     "a031c46782e6e6c662c2c87c76da9aa62ccabd8e"
@@ -146,9 +146,14 @@ data "aws_iam_policy_document" "gha_policy" {
     sid     = "ECRPushPull"
     effect  = "Allow"
     actions = [
-      "ecr:GetAuthorizationToken","ecr:BatchCheckLayerAvailability",
-      "ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:PutImage",
-      "ecr:CompleteLayerUpload","ecr:InitiateLayerUpload","ecr:UploadLayerPart"
+      "ecr:GetAuthorizationToken",
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer",
+      "ecr:BatchGetImage",
+      "ecr:PutImage",
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:UploadLayerPart"
     ]
     resources = ["*"]
   }
@@ -156,11 +161,18 @@ data "aws_iam_policy_document" "gha_policy" {
     sid     = "SageMakerOps"
     effect  = "Allow"
     actions = [
-      "sagemaker:CreateTrainingJob","sagemaker:DescribeTrainingJob",
-      "sagemaker:ListTrainingJobs","sagemaker:CreateModel","sagemaker:DeleteModel",
-      "sagemaker:DescribeModel","sagemaker:CreateEndpointConfig",
-      "sagemaker:DescribeEndpointConfig","sagemaker:CreateEndpoint",
-      "sagemaker:UpdateEndpoint","sagemaker:DescribeEndpoint"
+      "sagemaker:CreateTrainingJob",
+      "sagemaker:DescribeTrainingJob",
+      "sagemaker:ListTrainingJobs",
+      "sagemaker:CreateModel",
+      "sagemaker:DeleteModel",
+      "sagemaker:DescribeModel",
+      "sagemaker:CreateEndpointConfig",
+      "sagemaker:DescribeEndpointConfig",
+      "sagemaker:CreateEndpoint",
+      "sagemaker:UpdateEndpoint",
+      "sagemaker:DescribeEndpoint",
+      "sagemaker:AddTags"      # Added to allow tagging training jobs
     ]
     resources = ["*"]
   }
@@ -201,4 +213,3 @@ resource "aws_iam_role_policy_attachment" "gha_attach" {
 output "github_actions_role_arn" {
   value = aws_iam_role.gha.arn
 }
-
