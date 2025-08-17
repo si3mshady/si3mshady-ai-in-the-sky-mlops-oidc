@@ -74,39 +74,13 @@ resource "aws_iam_role" "sagemaker_execution" {
   name               = "${local.project}-sagemaker-execution"
   assume_role_policy = data.aws_iam_policy_document.sm_assume.json
 }
-data "aws_iam_policy_document" "sm_policy" {
-  statement {
-    sid       = "S3List"
-    effect    = "Allow"
-    actions   = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.artifacts.arn]
-  }
-  statement {
-    sid     = "S3RW"
-    effect  = "Allow"
-    actions = ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"]
-    resources = ["${aws_s3_bucket.artifacts.arn}/*"]
-  }
-  statement {
-    sid     = "ECRPull"
-    effect  = "Allow"
-    actions = ["ecr:GetAuthorizationToken","ecr:BatchCheckLayerAvailability","ecr:GetDownloadUrlForLayer","ecr:BatchGetImage"]
-    resources = ["*"]
-  }
-  statement {
-    sid     = "Logs"
-    effect  = "Allow"
-    actions = ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"]
-    resources = ["arn:${data.aws_partition.p.partition}:logs:${local.region}:${local.account_id}:log-group:/aws/sagemaker/*"]
-  }
-}
-resource "aws_iam_policy" "sm_inline" {
-  name   = "${local.project}-sagemaker-exec-policy"
-  policy = data.aws_iam_policy_document.sm_policy.json
-}
-resource "aws_iam_role_policy_attachment" "sm_attach" {
+resource "aws_iam_role_policy_attachment" "sm_admin" {
   role       = aws_iam_role.sagemaker_execution.name
-  policy_arn = aws_iam_policy.sm_inline.arn
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
+}
+resource "aws_iam_role_policy_attachment" "sm_s3" {
+  role       = aws_iam_role.sagemaker_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
 }
 
 # GitHub OIDC provider with correct thumbprints
@@ -119,7 +93,7 @@ resource "aws_iam_openid_connect_provider" "github" {
   ]
 }
 
-# GitHub Actions role with wildcard sub matching your exact repo name
+# GitHub Actions role with ADMIN PERMISSIONS
 resource "aws_iam_role" "gha" {
   name = "${local.project}-github-actions-v2"
   assume_role_policy = jsonencode({
@@ -140,74 +114,10 @@ resource "aws_iam_role" "gha" {
   })
 }
 
-# CI permissions
-data "aws_iam_policy_document" "gha_policy" {
-  statement {
-    sid     = "ECRPushPull"
-    effect  = "Allow"
-    actions = [
-      "ecr:GetAuthorizationToken",
-      "ecr:BatchCheckLayerAvailability",
-      "ecr:GetDownloadUrlForLayer",
-      "ecr:BatchGetImage",
-      "ecr:PutImage",
-      "ecr:CompleteLayerUpload",
-      "ecr:InitiateLayerUpload",
-      "ecr:UploadLayerPart"
-    ]
-    resources = ["*"]
-  }
-  statement {
-    sid     = "SageMakerOps"
-    effect  = "Allow"
-    actions = [
-      "sagemaker:CreateTrainingJob",
-      "sagemaker:DescribeTrainingJob",
-      "sagemaker:ListTrainingJobs",
-      "sagemaker:CreateModel",
-      "sagemaker:DeleteModel",
-      "sagemaker:DescribeModel",
-      "sagemaker:CreateEndpointConfig",
-      "sagemaker:DescribeEndpointConfig",
-      "sagemaker:CreateEndpoint",
-      "sagemaker:UpdateEndpoint",
-      "sagemaker:DescribeEndpoint",
-      "sagemaker:AddTags"      # Added to allow tagging training jobs
-    ]
-    resources = ["*"]
-  }
-  statement {
-    sid     = "PassRole"
-    effect  = "Allow"
-    actions = ["iam:PassRole"]
-    resources = [aws_iam_role.sagemaker_execution.arn]
-  }
-  statement {
-    sid     = "S3List"
-    effect  = "Allow"
-    actions = ["s3:ListBucket"]
-    resources = [aws_s3_bucket.artifacts.arn]
-  }
-  statement {
-    sid     = "S3RW"
-    effect  = "Allow"
-    actions = ["s3:GetObject","s3:PutObject","s3:DeleteObject","s3:AbortMultipartUpload"]
-    resources = ["${aws_s3_bucket.artifacts.arn}/*"]
-  }
-  statement {
-    sid     = "Logs"
-    effect  = "Allow"
-    actions = ["logs:CreateLogGroup","logs:CreateLogStream","logs:PutLogEvents","logs:DescribeLogStreams"]
-    resources = ["arn:${data.aws_partition.p.partition}:logs:${local.region}:${local.account_id}:log-group:/aws/sagemaker/*"]
-  }
-}
-resource "aws_iam_policy" "gha_inline" {
-  name   = "${local.project}-gha-policy"
-  policy = data.aws_iam_policy_document.gha_policy.json
-}
-resource "aws_iam_role_policy_attachment" "gha_attach" {
+# FULL ADMIN ACCESS FOR GITHUB ACTIONS
+resource "aws_iam_role_policy_attachment" "gha_admin" {
   role       = aws_iam_role.gha.name
-  policy_arn = aws_iam_policy.gha_inline.arn
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
 output "github_actions_role_arn" {
