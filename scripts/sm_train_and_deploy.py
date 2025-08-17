@@ -4,70 +4,141 @@ import json
 import boto3
 from datetime import datetime
 
-region     = os.environ["AWS_REGION"]
-sagemaker  = boto3.client("sagemaker", region_name=region)
+# ----------------------------------------
+# SageMaker client and common parameters
+# ----------------------------------------
+region      = os.environ["AWS_REGION"]
+sagemaker   = boto3.client("sagemaker", region_name=region)
+TRAIN_IMAGE = os.environ["TRAIN_IMAGE_URI"]
+INFER_IMAGE = os.environ["INFER_IMAGE_URI"]
+ROLE_ARN    = os.environ["SAGEMAKER_EXECUTION_ROLE_ARN"]
 
-# GitHub Actions inputs
-TRAIN_IMAGE_URI = os.environ["TRAIN_IMAGE_URI"]
-ROLE_ARN        = os.environ["SAGEMAKER_EXECUTION_ROLE_ARN"]
-S3_BUCKET       = os.environ["S3_BUCKET"]
-S3_PREFIX       = os.environ.get("S3_PREFIX", "training/")
+# Your real data location
+S3_BUCKET   = os.environ["S3_BUCKET"]
+S3_PREFIX   = os.environ.get("S3_TRAIN_PREFIX", "training/").rstrip("/") + "/"
 
-# Other configs
+# Endpoint settings
+ENDPOINT_BASE = os.environ.get("ENDPOINT_NAME_BASE", "urbansound-audio")
+ENDPOINT_ENV  = os.environ.get("ENDPOINT_ENV", "production")
+GIT_SHA       = os.environ.get("GIT_SHA", "local")
+
+# Training resources
 TRAIN_INSTANCE = os.environ.get("INSTANCE_TYPE", "ml.m5.large")
-HYPERPARAMS    = {"EPOCHS": os.environ.get("EPOCHS", "5")}
+SERVE_INSTANCE = os.environ.get("SERVE_INSTANCE_TYPE", "ml.g4dn.xlarge")
+EPOCHS         = os.environ.get("EPOCHS", "5")
 
+# Timestamps for naming
 ts       = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
 job_name = f"urbansound-train-{ts}"
 out_path = f"s3://{S3_BUCKET}/artifacts/{job_name}"
 
-def wait_training(name):
+def wait_training(job_name: str):
+    """Poll SageMaker until the training job completes."""
     sm = boto3.client("sagemaker", region_name=region)
     while True:
-        desc = sm.describe_training_job(TrainingJobName=name)
+        desc = sm.describe_training_job(TrainingJobName=job_name)
         status = desc["TrainingJobStatus"]
-        print("status=", status)
+        print(f"  status={status}")
         if status in ("Completed", "Failed", "Stopped"):
             return desc
         time.sleep(30)
 
-def main():
-    print("Launching SageMaker training...")
+def create_or_update_endpoint(model_name: str, endpoint_name: str, instance_type: str):
+    """Create or update the SageMaker endpoint for inference."""
+    sm = boto3.client("sagemaker", region_name=region)
+    cfg_name = f"{endpoint_name}-cfg-{ts}"
 
-    # Create training job, but do NOT configure S3 channels
+    sm.create_endpoint_config(
+        EndpointConfigName=cfg_name,
+        ProductionVariants=[{
+            "VariantName": "AllTraffic",
+            "ModelName":    model_name,
+            "InstanceType": instance_type,
+            "InitialInstanceCount": 1,
+            "InitialVariantWeight": 1.0
+        }],
+    )
+
+    try:
+        sm.describe_endpoint(EndpointName=endpoint_name)
+        print(f"Updating endpoint {endpoint_name}...")
+        sm.update_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
+    except sm.exceptions.ClientError:
+        print(f"Creating endpoint {endpoint_name}...")
+        sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
+
+def main():
+    print("Launching SageMaker training job:", job_name)
+
+    # ----------------------------------------------------------------
+    # MUST have at least one channel—provide a dummy channel to satisfy
+    # the API requirement of min length = 1 [9].
+    # ----------------------------------------------------------------
+    input_cfg = [{
+        "ChannelName": "training",
+        "DataSource": {
+            "S3DataSource": {
+                "S3DataType": "S3Prefix",
+                "S3Uri":      f"s3://{S3_BUCKET}/{S3_PREFIX}dummy/",
+                "S3DataDistributionType": "FullyReplicated"
+            }
+        },
+        "InputMode": "File"
+    }]
+
+    # Create the training job
     sagemaker.create_training_job(
         TrainingJobName=job_name,
         RoleArn=ROLE_ARN,
         AlgorithmSpecification={
-            "TrainingImage": TRAIN_IMAGE_URI,
+            "TrainingImage": TRAIN_IMAGE,
             "TrainingInputMode": "File"
         },
-        InputDataConfig=[],  # no channels
+        InputDataConfig=input_cfg,             # cannot be empty
         OutputDataConfig={"S3OutputPath": out_path},
         ResourceConfig={
             "InstanceType": TRAIN_INSTANCE,
             "InstanceCount": 1,
             "VolumeSizeInGB": 50
         },
-        StoppingCondition={"MaxRuntimeInSeconds": 2*3600},
-        HyperParameters=HYPERPARAMS,
+        StoppingCondition={"MaxRuntimeInSeconds": 2 * 3600},
+        HyperParameters={"EPOCHS": EPOCHS},
         Environment={
-            # Tell the container where to fetch data
+            # Real data your container will pull directly
             "S3_TRAIN_BUCKET": S3_BUCKET,
             "S3_TRAIN_PREFIX": S3_PREFIX,
-            "SM_MODEL_DIR": "/opt/ml/model",
-            "SM_OUTPUT_DATA_DIR": "/opt/ml/output"
-        }
+            "SM_MODEL_DIR": "/opt/ml/model"
+        },
+        Tags=[
+            {"Key": "project", "Value": "urbansound"},
+            {"Key": "commit",  "Value": GIT_SHA},
+            {"Key": "env",     "Value": ENDPOINT_ENV}
+        ]
     )
 
+    # Poll until completion
     desc = wait_training(job_name)
     if desc["TrainingJobStatus"] != "Completed":
         raise RuntimeError(f"Training failed: {desc.get('FailureReason')}")
 
-    print(json.dumps({
-        "ModelArtifacts": desc["ModelArtifacts"],
-        "TrainingJobArn": desc["TrainingJobArn"]
-    }, indent=2))
+    # Retrieve model artifact
+    model_artifact = desc["ModelArtifacts"]["S3ModelArtifacts"]
+    print("Model artifact:", model_artifact)
+
+    # Create and deploy the model
+    model_name    = f"{ENDPOINT_BASE}-mdl-{ts}"
+    container_def = {
+        "Image":       INFER_IMAGE,
+        "Mode":        "SingleModel",
+        "ModelDataUrl": model_artifact,
+        "Environment": {"SAGEMAKER_PROGRAM": "serve.py"}
+    }
+    sagemaker.create_model(ModelName=model_name, ExecutionRoleArn=ROLE_ARN, PrimaryContainer=container_def)
+
+    endpoint_name = f"{ENDPOINT_BASE}-{ENDPOINT_ENV}"
+    create_or_update_endpoint(model_name, endpoint_name, SERVE_INSTANCE)
+
+    print("Deployment complete. Endpoint:", endpoint_name)
 
 if __name__ == "__main__":
     main()
