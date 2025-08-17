@@ -24,8 +24,6 @@ locals {
   s3_bucket_name = "urbansound-mlops-56423506"
   github_owner   = "si3mshady"
   github_repo    = "ai-in-the-sky-mlops-oidc"
-  # Force recreation trigger
-  gha_role_version = "v2"
 }
 
 data "aws_partition" "p" {}
@@ -155,49 +153,39 @@ resource "aws_iam_role_policy_attachment" "sm_attach" {
   policy_arn = aws_iam_policy.sm_inline.arn
 }
 
-# ---------------- GITHUB OIDC PROVIDER ----------------
+# ---------------- GITHUB OIDC PROVIDER (CORRECT THUMBPRINTS) ----------------
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
+  # CORRECT THUMBPRINTS FROM GITHUB DOCS
   thumbprint_list = [
     "6938fd4d98bab03faadb97b34396831e3780aea1",
-    "1c58a3a8518e8759bf075b76b750d4f2df264fcd"
+    "a031c46782e6e6c662c2c87c76da9aa62ccabd8e"
   ]
 }
 
-# ---------------- GHA ROLE + TRUST (FIXED) ----------------
-data "aws_iam_policy_document" "gha_assume" {
-  statement {
-    effect  = "Allow"
-    actions = ["sts:AssumeRoleWithWebIdentity"]
-    principals {
-      type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
-    }
-    
-    condition {
-      test     = "StringEquals"
-      variable = "token.actions.githubusercontent.com:aud"
-      values   = ["sts.amazonaws.com"]
-    }
-    
-    condition {
-      test     = "StringLike"
-      variable = "token.actions.githubusercontent.com:sub"
-      values   = [
-        "repo:${local.github_owner}/${local.github_repo}:ref:refs/heads/main",
-        "repo:${local.github_owner}/${local.github_repo}:ref:refs/heads/develop",
-        "repo:${local.github_owner}/${local.github_repo}:ref:refs/tags/*",
-        "repo:${local.github_owner}/${local.github_repo}:pull_request",
-        "repo:${local.github_owner}/${local.github_repo}:environment:*"
-      ]
-    }
-  }
-}
-
+# ---------------- GHA ROLE (SIMPLE TRUST POLICY) ----------------
 resource "aws_iam_role" "gha" {
-  name               = "${local.project}-github-actions-${local.gha_role_version}"
-  assume_role_policy = data.aws_iam_policy_document.gha_assume.json
+  name = "${local.project}-github-actions-v2"
+  
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${local.github_owner}/${local.github_repo}:*"
+        }
+      }
+    }]
+  })
 }
 
 # CI permissions: ECR push, SageMaker ops, S3 RW, logs, and iam:PassRole
