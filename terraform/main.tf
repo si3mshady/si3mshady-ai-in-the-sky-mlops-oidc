@@ -1,6 +1,7 @@
 ########################################
 # infra/main.tf
 ########################################
+
 terraform {
   required_version = ">= 1.5.0"
   required_providers {
@@ -16,12 +17,12 @@ provider "aws" {
 }
 
 locals {
-  project     = "urbansound"
-  region      = "us-east-2"
-  account_id  = "564230509626"
-  s3_bucket   = "urbansound-mlops-56423506"
-  github_owner= "si3mshady"
-  github_repo = "ai-in-the-sky-mlops-oidc"
+  project      = "urbansound"
+  region       = "us-east-2"
+  account_id   = "564230509626"
+  s3_bucket    = "urbansound-mlops-56423506"
+  github_owner = "si3mshady"
+  github_repo  = "si3mshady-ai-in-the-sky-mlops-oidc"
 }
 
 data "aws_partition" "p" {}
@@ -49,15 +50,24 @@ resource "aws_s3_bucket_public_access_block" "artifacts" {
   restrict_public_buckets = true
 }
 
-# ECR repos
-resource "aws_ecr_repository" "train" { name = "${local.project}-train" image_scanning_configuration { scan_on_push = true } }
-resource "aws_ecr_repository" "infer" { name = "${local.project}-infer" image_scanning_configuration { scan_on_push = true } }
+# ECR repositories
+resource "aws_ecr_repository" "train" {
+  name = "${local.project}-train"
+  image_scanning_configuration { scan_on_push = true }
+}
+resource "aws_ecr_repository" "infer" {
+  name = "${local.project}-infer"
+  image_scanning_configuration { scan_on_push = true }
+}
 
 # SageMaker execution role
 data "aws_iam_policy_document" "sm_assume" {
   statement {
     actions = ["sts:AssumeRole"]
-    principals { type = "Service" identifiers = ["sagemaker.amazonaws.com"] }
+    principals {
+      type        = "Service"
+      identifiers = ["sagemaker.amazonaws.com"]
+    }
   }
 }
 resource "aws_iam_role" "sagemaker_execution" {
@@ -99,7 +109,7 @@ resource "aws_iam_role_policy_attachment" "sm_attach" {
   policy_arn = aws_iam_policy.sm_inline.arn
 }
 
-# OIDC provider with correct GitHub thumbprints
+# GitHub OIDC provider with correct thumbprints
 resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
@@ -109,7 +119,7 @@ resource "aws_iam_openid_connect_provider" "github" {
   ]
 }
 
-# GitHub Actions OIDC role with wildcard sub matcher
+# GitHub Actions role with wildcard sub matching your exact repo name
 resource "aws_iam_role" "gha" {
   name = "${local.project}-github-actions-v2"
   assume_role_policy = jsonencode({
@@ -123,7 +133,6 @@ resource "aws_iam_role" "gha" {
           "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
         }
         StringLike = {
-          # wildcard matches branch, tag, PR, environment
           "token.actions.githubusercontent.com:sub" = "repo:${local.github_owner}/${local.github_repo}:*"
         }
       }
@@ -131,14 +140,15 @@ resource "aws_iam_role" "gha" {
   })
 }
 
-# CI permissions policy
+# CI permissions
 data "aws_iam_policy_document" "gha_policy" {
   statement {
     sid     = "ECRPushPull"
     effect  = "Allow"
     actions = [
-      "ecr:GetAuthorizationToken","ecr:BatchCheckLayerAvailability","ecr:GetDownloadUrlForLayer","ecr:BatchGetImage",
-      "ecr:PutImage","ecr:CompleteLayerUpload","ecr:InitiateLayerUpload","ecr:UploadLayerPart"
+      "ecr:GetAuthorizationToken","ecr:BatchCheckLayerAvailability",
+      "ecr:GetDownloadUrlForLayer","ecr:BatchGetImage","ecr:PutImage",
+      "ecr:CompleteLayerUpload","ecr:InitiateLayerUpload","ecr:UploadLayerPart"
     ]
     resources = ["*"]
   }
@@ -146,10 +156,11 @@ data "aws_iam_policy_document" "gha_policy" {
     sid     = "SageMakerOps"
     effect  = "Allow"
     actions = [
-      "sagemaker:CreateTrainingJob","sagemaker:DescribeTrainingJob","sagemaker:ListTrainingJobs",
-      "sagemaker:CreateModel","sagemaker:DeleteModel","sagemaker:DescribeModel",
-      "sagemaker:CreateEndpointConfig","sagemaker:DescribeEndpointConfig",
-      "sagemaker:CreateEndpoint","sagemaker:UpdateEndpoint","sagemaker:DescribeEndpoint"
+      "sagemaker:CreateTrainingJob","sagemaker:DescribeTrainingJob",
+      "sagemaker:ListTrainingJobs","sagemaker:CreateModel","sagemaker:DeleteModel",
+      "sagemaker:DescribeModel","sagemaker:CreateEndpointConfig",
+      "sagemaker:DescribeEndpointConfig","sagemaker:CreateEndpoint",
+      "sagemaker:UpdateEndpoint","sagemaker:DescribeEndpoint"
     ]
     resources = ["*"]
   }
@@ -187,5 +198,7 @@ resource "aws_iam_role_policy_attachment" "gha_attach" {
   policy_arn = aws_iam_policy.gha_inline.arn
 }
 
-output "github_actions_role_arn" { value = aws_iam_role.gha.arn }
+output "github_actions_role_arn" {
+  value = aws_iam_role.gha.arn
+}
 

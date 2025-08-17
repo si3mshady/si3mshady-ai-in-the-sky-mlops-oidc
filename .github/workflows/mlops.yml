@@ -69,7 +69,6 @@ jobs:
           role-skip-session-tagging: true
 
       - name: ECR Login
-        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & Push TRAIN image
@@ -136,7 +135,7 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - name: Train and Deploy
+      - name: Train + (Re)Deploy Endpoint
         run: |
           python scripts/sm_train_and_deploy.py \
             --region ${{ env.AWS_REGION }} \
