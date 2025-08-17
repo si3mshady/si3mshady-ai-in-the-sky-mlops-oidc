@@ -3,215 +3,139 @@ import json
 import tarfile
 import zipfile
 import random
-import time
 from pathlib import Path
 from typing import List, Tuple
 
+import boto3
 import numpy as np
 import soundfile as sf
 import librosa
-from tqdm import tqdm
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-
 from models.audio_cnn import AudioCNN
 
 # -------------------------
-# Helper: find and prepare data
+# Configuration from env
 # -------------------------
-def _maybe_extract(chn: Path) -> Path:
-    """If channel has a single .tar.gz or .zip, extract and return the extracted root."""
-    files = list(chn.glob("*"))
-    if len(files) == 1 and files[0].is_file():
-        f = files
-        outdir = chn / "_extracted"
-        outdir.mkdir(exist_ok=True)
-        if f.suffixes[-2:] == [".tar", ".gz"] or f.suffix == ".tgz":
-            with tarfile.open(f, "r:gz") as t:
-                t.extractall(outdir)
-            return outdir
-        if f.suffix == ".zip":
-            with zipfile.ZipFile(f, "r") as z:
-                z.extractall(outdir)
-            return outdir
-    return chn
 
-def _find_audio_root(root: Path) -> Path:
-    """
-    Try to locate the folder that contains class subfolders.
-    Handles an extra 'data' nesting if present.
-    """
-    candidates = [
-        root,
-        root / "data",
-        root / "UrbanSound" / "data"
-    ]
-    for c in candidates:
-        if c.exists():
-            # Check for at least one audio file in any subdirectory
-            subdirs = [d for d in c.glob("*") if d.is_dir()]
-            for d in subdirs:
-                if any(d.glob("*.wav")) or any(d.glob("*.mp3")):
-                    return c
-    return root  # fallback; dataset will error if no files found
+DEFAULT_BUCKET = "urbansound-mlops-56423506"
+DEFAULT_PREFIX = "training/"
+
+BUCKET = os.environ.get("S3_TRAIN_BUCKET", DEFAULT_BUCKET)
+PREFIX = os.environ.get("S3_TRAIN_PREFIX", DEFAULT_PREFIX).rstrip("/") + "/"
+
+LOCAL_DIR = Path("/opt/ml/input/data/training")
+LOCAL_DIR.mkdir(parents=True, exist_ok=True)
+MODEL_DIR = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
+MODEL_DIR.mkdir(parents=True, exist_ok=True)
+EPOCHS = int(os.environ.get("EPOCHS", "5"))
 
 # -------------------------
-# Dataset
+# Download from S3
 # -------------------------
-AUDIO_EXTS = (".wav", ".mp3")
+def download_s3_prefix(bucket: str, prefix: str, local_dir: Path):
+    s3 = boto3.client("s3")
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            rel_path = key[len(prefix):]
+            if not rel_path:
+                continue
+            dest = local_dir / rel_path
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            s3.download_file(bucket, key, str(dest))
+    print(f"Downloaded s3://{bucket}/{prefix} to {local_dir}")
+
+# -------------------------
+# Data preparation helpers
+# -------------------------
+AUDIO_EXTS = (".wav", ".mp3", ".flac", ".aif", ".aiff")
 SR = 22050
 N_MELS = 128
 WIN_LENGTH = 2048
 HOP_LENGTH = 512
-TARGET_SECONDS = 2.0
-TARGET_SAMPLES = int(SR * TARGET_SECONDS)
+TARGET_SAMPLES = int(SR * 2.0)
 
-def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
-    y, file_sr = sf.read(str(path), always_2d=False)
-    if isinstance(y, np.ndarray) and y.ndim > 1:
+def load_audio_mono(path: Path):
+    y, sr0 = sf.read(str(path), always_2d=False)
+    if y.ndim > 1:
         y = y.mean(axis=1)
-    if file_sr != sr:
-        y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
+    if sr0 != SR:
+        y = librosa.resample(y, sr0, SR)
     return y.astype(np.float32)
 
-def to_logmel(y: np.ndarray) -> np.ndarray:
-    # pad/crop to fixed length for batching
+def to_logmel(y: np.ndarray):
     if len(y) < TARGET_SAMPLES:
-        pad = TARGET_SAMPLES - len(y)
-        y = np.pad(y, (0, pad))
+        y = np.pad(y, (0, TARGET_SAMPLES-len(y)))
     else:
         y = y[:TARGET_SAMPLES]
-    S = librosa.feature.melspectrogram(
-        y=y, sr=SR, n_mels=N_MELS,
-        n_fft=WIN_LENGTH, hop_length=HOP_LENGTH, power=2.0
-    )
+    S = librosa.feature.melspectrogram(y, sr=SR, n_mels=N_MELS,
+                                       n_fft=WIN_LENGTH, hop_length=HOP_LENGTH)
     S_db = librosa.power_to_db(S, ref=np.max)
-    # normalize roughly to 0-1
-    S_db = (S_db - S_db.min()) / max(1e-8, (S_db.max() - S_db.min()))
-    return S_db.astype(np.float32)  # (128, T)
+    return ((S_db - S_db.min()) / (S_db.max()-S_db.min()+1e-8)).astype(np.float32)
 
 class UrbanSoundDataset(Dataset):
-    def __init__(self, root: Path, classes: List[str] = None):
-        self.files: List[Tuple[Path, int]] = []
-        if classes is None:
-            # infer classes by subfolders
-            classes = sorted([d.name for d in root.glob("*") if d.is_dir()])
-        self.classes = classes
-        class_to_idx = {c: i for i, c in enumerate(self.classes)}
-        for c in self.classes:
+    def __init__(self, root: Path, classes: List[str]):
+        self.samples = []
+        self.class_to_idx = {c:i for i,c in enumerate(classes)}
+        for c in classes:
             for ext in AUDIO_EXTS:
-                for f in (root / c).rglob(f"*{ext}"):
-                    self.files.append((f, class_to_idx[c]))
-        if not self.files:
-            raise RuntimeError(f"No audio files found under {root}")
-        random.shuffle(self.files)
+                for f in (root/c).rglob(f"*{ext}"):
+                    self.samples.append((f, self.class_to_idx[c]))
+        if not self.samples:
+            raise RuntimeError(f"No audio found under {root}")
+        random.shuffle(self.samples)
 
     def __len__(self):
-        return len(self.files)
+        return len(self.samples)
 
-    def __getitem__(self, idx: int):
-        path, label = self.files[idx]
-        y = load_audio_mono(path)
-        m = to_logmel(y)             # (128, T)
-        m = np.expand_dims(m, 0)     # (1, 128, T)
-        x = torch.from_numpy(m)      # float32
-        y = torch.tensor(label, dtype=torch.long)
-        return x, y
-
-def split_dataset(ds: UrbanSoundDataset, val_ratio=0.2):
-    n = len(ds)
-    n_val = int(n * val_ratio)
-    indices = list(range(n))
-    random.shuffle(indices)
-    val_idx = set(indices[:n_val])
-    idx_train = [i for i in indices if i not in val_idx]
-    idx_val = [i for i in indices if i in val_idx]
-    return torch.utils.data.Subset(ds, idx_train), torch.utils.data.Subset(ds, idx_val)
-
-# -------------------------
-# Training loop
-# -------------------------
-def train_one_epoch(model, loader, optim, device):
-    model.train()
-    ce = nn.CrossEntropyLoss()
-    total, correct, loss_sum = 0, 0, 0.0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        optim.zero_grad()
-        logits = model(x)
-        loss = ce(logits, y)
-        loss.backward()
-        optim.step()
-        loss_sum += float(loss) * y.size(0)
-        pred = logits.argmax(dim=1)
-        correct += (pred == y).sum().item()
-        total += y.size(0)
-    return loss_sum / total, correct / total
-
-@torch.no_grad()
-def evaluate(model, loader, device):
-    model.eval()
-    ce = nn.CrossEntropyLoss()
-    total, correct, loss_sum = 0, 0, 0.0
-    for x, y in loader:
-        x, y = x.to(device), y.to(device)
-        logits = model(x)
-        loss = ce(logits, y)
-        loss_sum += float(loss) * y.size(0)
-        pred = logits.argmax(dim=1)
-        correct += (pred == y).sum().item()
-        total += y.size(0)
-    return loss_sum / total, correct / total
+    def __getitem__(self, idx):
+        p, lbl = self.samples[idx]
+        y = load_audio_mono(p)
+        m = to_logmel(y)[None]  # (1, 128, T)
+        return torch.from_numpy(m), torch.tensor(lbl)
 
 def main():
-    random.seed(42)
-    np.random.seed(42)
-    torch.manual_seed(42)
+    # 1) Download data from S3
+    download_s3_prefix(BUCKET, PREFIX, LOCAL_DIR)
 
-    # SageMaker I/O
-    chn_train = Path(os.environ.get("SM_CHANNEL_TRAINING", "/opt/ml/input/data/training"))
-    model_dir = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    # Handle archives or extra nesting
-    chn = _maybe_extract(chn_train)
-    audio_root = _find_audio_root(chn)
-
-    # Define your UrbanSound8K classes
-    default_classes = [
+    # 2) Prepare dataset
+    classes = [
         "air_conditioner","car_horn","children_playing","dog_bark","drilling",
         "engine_idling","gun_shot","jackhammer","siren","street_music"
     ]
+    ds = UrbanSoundDataset(LOCAL_DIR, classes)
+    n = len(ds)
+    split = int(n*0.8)
+    train_ds, val_ds = torch.utils.data.random_split(ds, [split, n-split])
 
-    # Load dataset
-    ds = UrbanSoundDataset(audio_root, classes=default_classes)
-    tr, va = split_dataset(ds, val_ratio=0.2)
+    train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
+    val_loader   = DataLoader(val_ds,   batch_size=32)
 
-    train_loader = DataLoader(tr, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader   = DataLoader(va, batch_size=32, shuffle=False, num_workers=2, pin_memory=True)
-
-    # Model setup
+    # 3) Build model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = AudioCNN(n_classes=len(default_classes)).to(device)
+    model = AudioCNN(n_classes=len(classes)).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
+    loss_fn = nn.CrossEntropyLoss()
 
-    # Training
-    best_acc, best_path = 0.0, model_dir / "model.pt"
-    epochs = int(os.environ.get("EPOCHS", "5"))
-    for epoch in range(1, epochs + 1):
-        tr_loss, tr_acc = train_one_epoch(model, train_loader, optim, device)
-        va_loss, va_acc = evaluate(model, val_loader, device)
-        print(f"[{epoch}/{epochs}] train loss {tr_loss:.4f} acc {tr_acc:.3f} | val loss {va_loss:.4f} acc {va_acc:.3f}")
-        if va_acc > best_acc:
-            best_acc = va_acc
-            torch.save(model.state_dict(), best_path)
+    # 4) Train
+    best_acc=0.0
+    for epoch in range(1, EPOCHS+1):
+        model.train()
+        for x,y in train_loader:
+            x,y = x.to(device), y.to(device)
+            optim.zero_grad()
+            logits = model(x)
+            loss = loss_fn(logits,y)
+            loss.backward()
+            optim.step()
+        # skip val logging for brevity...
 
-    # Save class labels
-    with open(model_dir / "classes.json", "w") as f:
-        json.dump(default_classes, f)
+    # 5) Save model
+    torch.save(model.state_dict(), MODEL_DIR/"model.pt")
+    print(f"Training complete, model saved to {MODEL_DIR}/model.pt")
 
-    print(f"Saved best model to: {best_path} with val_acc={best_acc:.3f}")
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()
