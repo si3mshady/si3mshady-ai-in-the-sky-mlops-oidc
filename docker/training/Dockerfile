@@ -9,7 +9,7 @@ WORKDIR /opt/ml/code
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-COPY ./entrypoint.py ./train.py
+COPY entrypoint.py ./train.py
 
 ENV SAGEMAKER_PROGRAM=train.py
 
