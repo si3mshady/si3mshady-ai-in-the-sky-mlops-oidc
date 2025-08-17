@@ -75,7 +75,7 @@ jobs:
         id: build-train
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: docker/training     
           file: docker/training/Dockerfile
           push: true
           provenance: false
@@ -91,7 +91,7 @@ jobs:
         id: build-infer
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: docker/inference
           file: docker/inference/Dockerfile
           push: true
           provenance: false
