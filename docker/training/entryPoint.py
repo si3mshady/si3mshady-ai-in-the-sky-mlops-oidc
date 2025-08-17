@@ -1,11 +1,16 @@
-import os, json, tarfile, zipfile, random, math, time
+import os
+import json
+import tarfile
+import zipfile
+import random
+import time
 from pathlib import Path
 from typing import List, Tuple
+
 import numpy as np
 import soundfile as sf
 import librosa
 from tqdm import tqdm
-
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
@@ -19,7 +24,7 @@ def _maybe_extract(chn: Path) -> Path:
     """If channel has a single .tar.gz or .zip, extract and return the extracted root."""
     files = list(chn.glob("*"))
     if len(files) == 1 and files[0].is_file():
-        f = files[0]
+        f = files
         outdir = chn / "_extracted"
         outdir.mkdir(exist_ok=True)
         if f.suffixes[-2:] == [".tar", ".gz"] or f.suffix == ".tgz":
@@ -35,19 +40,21 @@ def _maybe_extract(chn: Path) -> Path:
 def _find_audio_root(root: Path) -> Path:
     """
     Try to locate the folder that contains class subfolders.
-    Expected patterns:
-      UrbanSound/data/<class>/*.wav|*.mp3
-      <anything>/<class>/*.wav|*.mp3
+    Handles an extra 'data' nesting if present.
     """
-    candidates = [root, root / "UrbanSound" / "data", root / "data"]
+    candidates = [
+        root,
+        root / "data",
+        root / "UrbanSound" / "data"
+    ]
     for c in candidates:
         if c.exists():
-            # Does it have subfolders that contain at least one audio file?
+            # Check for at least one audio file in any subdirectory
             subdirs = [d for d in c.glob("*") if d.is_dir()]
             for d in subdirs:
                 if any(d.glob("*.wav")) or any(d.glob("*.mp3")):
                     return c
-    return root  # fallback; dataset class will error if no files
+    return root  # fallback; dataset will error if no files found
 
 # -------------------------
 # Dataset
@@ -76,7 +83,8 @@ def to_logmel(y: np.ndarray) -> np.ndarray:
     else:
         y = y[:TARGET_SAMPLES]
     S = librosa.feature.melspectrogram(
-        y=y, sr=SR, n_mels=N_MELS, n_fft=WIN_LENGTH, hop_length=HOP_LENGTH, power=2.0
+        y=y, sr=SR, n_mels=N_MELS,
+        n_fft=WIN_LENGTH, hop_length=HOP_LENGTH, power=2.0
     )
     S_db = librosa.power_to_db(S, ref=np.max)
     # normalize roughly to 0-1
@@ -86,16 +94,15 @@ def to_logmel(y: np.ndarray) -> np.ndarray:
 class UrbanSoundDataset(Dataset):
     def __init__(self, root: Path, classes: List[str] = None):
         self.files: List[Tuple[Path, int]] = []
-        self.class_to_idx = {}
         if classes is None:
             # infer classes by subfolders
             classes = sorted([d.name for d in root.glob("*") if d.is_dir()])
         self.classes = classes
-        self.class_to_idx = {c: i for i, c in enumerate(self.classes)}
+        class_to_idx = {c: i for i, c in enumerate(self.classes)}
         for c in self.classes:
             for ext in AUDIO_EXTS:
                 for f in (root / c).rglob(f"*{ext}"):
-                    self.files.append((f, self.class_to_idx[c]))
+                    self.files.append((f, class_to_idx[c]))
         if not self.files:
             raise RuntimeError(f"No audio files found under {root}")
         random.shuffle(self.files)
@@ -158,34 +165,40 @@ def evaluate(model, loader, device):
     return loss_sum / total, correct / total
 
 def main():
-    random.seed(42); np.random.seed(42); torch.manual_seed(42)
+    random.seed(42)
+    np.random.seed(42)
+    torch.manual_seed(42)
 
     # SageMaker I/O
     chn_train = Path(os.environ.get("SM_CHANNEL_TRAINING", "/opt/ml/input/data/training"))
     model_dir = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
     model_dir.mkdir(parents=True, exist_ok=True)
 
-    # Extract if archive; then find the actual audio/class root
+    # Handle archives or extra nesting
     chn = _maybe_extract(chn_train)
     audio_root = _find_audio_root(chn)
 
-    # If your dataset uses the UrbanSound8K labels, set them here:
+    # Define your UrbanSound8K classes
     default_classes = [
         "air_conditioner","car_horn","children_playing","dog_bark","drilling",
         "engine_idling","gun_shot","jackhammer","siren","street_music"
     ]
+
+    # Load dataset
     ds = UrbanSoundDataset(audio_root, classes=default_classes)
     tr, va = split_dataset(ds, val_ratio=0.2)
 
     train_loader = DataLoader(tr, batch_size=32, shuffle=True, num_workers=2, pin_memory=True)
     val_loader   = DataLoader(va, batch_size=32, shuffle=False, num_workers=2, pin_memory=True)
 
+    # Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = AudioCNN(n_classes=len(default_classes)).to(device)
     optim = torch.optim.Adam(model.parameters(), lr=1e-3)
 
+    # Training
     best_acc, best_path = 0.0, model_dir / "model.pt"
-    epochs = int(os.environ.get("EPOCHS", "5"))  # keep fast by default
+    epochs = int(os.environ.get("EPOCHS", "5"))
     for epoch in range(1, epochs + 1):
         tr_loss, tr_acc = train_one_epoch(model, train_loader, optim, device)
         va_loss, va_acc = evaluate(model, val_loader, device)
@@ -194,11 +207,11 @@ def main():
             best_acc = va_acc
             torch.save(model.state_dict(), best_path)
 
-    # Save artifacts (SageMaker will tar /opt/ml/model automatically)
+    # Save class labels
     with open(model_dir / "classes.json", "w") as f:
         json.dump(default_classes, f)
+
     print(f"Saved best model to: {best_path} with val_acc={best_acc:.3f}")
 
 if __name__ == "__main__":
     main()
-
