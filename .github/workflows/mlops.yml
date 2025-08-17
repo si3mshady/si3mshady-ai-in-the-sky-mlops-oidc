@@ -1,14 +1,17 @@
 name: UrbanSound • SageMaker OIDC MLOps
 
 permissions:
-  id-token: write    # grant OIDC token write
+  id-token: write
   contents: read
 
 on:
   push:
-    branches: [ main, develop ]
+    branches:
+      - main
+      - develop
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       force_retrain:
@@ -18,7 +21,9 @@ on:
         description: "Endpoint environment"
         default: "staging"
         type: choice
-        options: [staging, production]
+        options:
+          - staging
+          - production
       train_instance_type:
         description: "SageMaker Training InstanceType"
         default: "ml.m5.large"
@@ -48,10 +53,13 @@ jobs:
     outputs:
       train-image-uri: ${{ steps.out-train.outputs.TRAIN_IMAGE_URI }}
       infer-image-uri: ${{ steps.out-infer.outputs.INFER_IMAGE_URI }}
-    steps:
-      - uses: actions/checkout@v4
 
-      - uses: docker/setup-buildx-action@v3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -60,10 +68,12 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - id: ecr
+      - name: ECR Login
+        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - id: build-train
+      - name: Build & Push TRAIN image
+        id: build-train
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -78,7 +88,8 @@ jobs:
           build-args: |
             GIT_SHA=${{ github.sha }}
 
-      - id: build-infer
+      - name: Build & Push INFER image
+        id: build-infer
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -94,22 +105,29 @@ jobs:
             GIT_SHA=${{ github.sha }}
 
       - name: Output Train URI
+        id: out-train
         run: echo "TRAIN_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
       - name: Output Infer URI
+        id: out-infer
         run: echo "INFER_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
 
   sagemaker-train-and-deploy:
     name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
-        with: python-version: ${{ env.PYTHON_VERSION }}
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
 
-      - run: pip install boto3 botocore pyyaml
+      - name: Install dependencies
+        run: pip install boto3 botocore pyyaml
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -118,7 +136,8 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - run: |
+      - name: Train and Deploy
+        run: |
           python scripts/sm_train_and_deploy.py \
             --region ${{ env.AWS_REGION }} \
             --bucket ${{ env.S3_BUCKET }} \
