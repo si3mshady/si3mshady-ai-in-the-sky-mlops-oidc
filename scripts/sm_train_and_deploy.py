@@ -21,8 +21,8 @@ SERVE_INSTANCE         = os.environ.get("SERVE_INSTANCE_TYPE", "ml.g4dn.xlarge")
 ENDPOINT_ENV           = os.environ.get("ENDPOINT_ENV", "staging")
 GIT_SHA                = os.environ.get("GIT_SHA", "local")
 
-# Corrected S3 prefixes
-S3_TRAIN_PREFIX        = f"s3://{S3_BUCKET}/training/"
+# Use the single archive in S3 and tell SageMaker it's gzip-compressed
+S3_TRAIN_ARCHIVE       = f"s3://{S3_BUCKET}/data/UrbanSound.tar.gz"
 S3_OUTPUT_PREFIX       = f"s3://{S3_BUCKET}/artifacts"
 
 # Job name
@@ -73,14 +73,15 @@ def create_or_update_endpoint(model_name, endpoint_name, instance_type):
 def main():
     print("Launching SageMaker training...")
 
-    # InputDataConfig pointing to /training prefix
+    # InputDataConfig points at the single .tar.gz archive and tells SageMaker to decompress it
     input_cfg = [{
         "ChannelName": "training",
         "DataSource": {
             "S3DataSource": {
-                "S3DataType":               "S3Prefix",
-                "S3Uri":                    S3_TRAIN_PREFIX,
-                "S3DataDistributionType":   "FullyReplicated"
+                "S3DataType":             "S3Prefix",
+                "S3Uri":                  S3_TRAIN_ARCHIVE,
+                "S3DataDistributionType": "FullyReplicated",
+                "CompressionType":        "Gzip"
             }
         },
         "InputMode": "File"
