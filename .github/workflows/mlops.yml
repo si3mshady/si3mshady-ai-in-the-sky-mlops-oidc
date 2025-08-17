@@ -143,10 +143,10 @@ jobs:
           S3_BUCKET: ${{ env.S3_BUCKET }}
           SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
           ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
-          FORCE_RETRAIN: ${{ github.event.inputs.force_retrain }}
-          INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type }}
-          SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type }}
-          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env }}
+          FORCE_RETRAIN: ${{ github.event.inputs.force_retrain || 'false' }}
+          INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type || 'ml.m5.large' }}
+          SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type || 'ml.g4dn.xlarge' }}
+          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env || 'staging' }}
           GIT_SHA: ${{ github.sha }}
         run: |
           python scripts/sm_train_and_deploy.py \
