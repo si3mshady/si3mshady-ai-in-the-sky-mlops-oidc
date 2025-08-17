@@ -28,7 +28,7 @@ on:
         description: "SageMaker Training InstanceType"
         default: "ml.m5.large"
       serve_instance_type:
-        description: "Endpoint InstanceType"
+        description: "SageMaker Inference InstanceType"
         default: "ml.g4dn.xlarge"
 
 env:
@@ -143,10 +143,10 @@ jobs:
           S3_BUCKET: ${{ env.S3_BUCKET }}
           SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
           ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
-          FORCE_RETRAIN: ${{ inputs.force_retrain }}
-          INSTANCE_TYPE: ${{ inputs.train_instance_type }}
-          SERVE_INSTANCE_TYPE: ${{ inputs.serve_instance_type }}
-          ENDPOINT_ENV: ${{ inputs.endpoint_env }}
+          FORCE_RETRAIN: ${{ github.event.inputs.force_retrain }}
+          INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type }}
+          SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type }}
+          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env }}
           GIT_SHA: ${{ github.sha }}
         run: |
           python scripts/sm_train_and_deploy.py \
