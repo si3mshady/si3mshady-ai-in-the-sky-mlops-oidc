@@ -1,5 +1,9 @@
 name: UrbanSound • SageMaker OIDC MLOps
 
+permissions:
+  id-token: write
+  contents: read
+
 on:
   push:
     branches: [ main, develop ]
@@ -33,10 +37,6 @@ env:
   ENDPOINT_NAME_BASE: urbansound-audio
   PYTHON_VERSION: "3.11"
 
-permissions:
-  id-token: write
-  contents: read
-
 concurrency:
   group: mlops-${{ github.ref }}
   cancel-in-progress: false
@@ -51,21 +51,21 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
-        
+
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
-          
+
       - name: ECR Login
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
-        
+
       - name: Build & Push TRAIN image
         id: build-train
         uses: docker/build-push-action@v6
@@ -81,7 +81,7 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             GIT_SHA=${{ github.sha }}
-            
+
       - name: Build & Push INFER image
         id: build-infer
         uses: docker/build-push-action@v6
@@ -97,12 +97,12 @@ jobs:
           cache-to: type=gha,mode=max
           build-args: |
             GIT_SHA=${{ github.sha }}
-            
+
       - name: Output Train URI
         id: out-train
         run: |
           echo "TRAIN_IMAGE_URI=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> $GITHUB_OUTPUT
-          
+
       - name: Output Infer URI
         id: out-infer
         run: |
@@ -115,22 +115,22 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-          
+
       - name: Install deps for control script
         run: pip install boto3 botocore pyyaml
-        
+
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
-          
+
       - name: Train + (Re)Deploy Endpoint
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
@@ -145,4 +145,3 @@ jobs:
           ENDPOINT_ENV: ${{ inputs.endpoint_env }}
           GIT_SHA: ${{ github.sha }}
         run: python scripts/sm_train_and_deploy.py
-
