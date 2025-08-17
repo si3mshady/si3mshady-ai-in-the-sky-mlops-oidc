@@ -60,7 +60,7 @@ resource "aws_ecr_repository" "infer" {
   image_scanning_configuration { scan_on_push = true }
 }
 
-# SageMaker execution role
+# SageMaker execution role with full admin
 data "aws_iam_policy_document" "sm_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -76,14 +76,10 @@ resource "aws_iam_role" "sagemaker_execution" {
 }
 resource "aws_iam_role_policy_attachment" "sm_admin" {
   role       = aws_iam_role.sagemaker_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonSageMakerFullAccess"
-}
-resource "aws_iam_role_policy_attachment" "sm_s3" {
-  role       = aws_iam_role.sagemaker_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+  policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
-# GitHub OIDC provider with correct thumbprints
+# GitHub OIDC provider
 resource "aws_iam_openid_connect_provider" "github" {
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
@@ -93,7 +89,7 @@ resource "aws_iam_openid_connect_provider" "github" {
   ]
 }
 
-# GitHub Actions role with ADMIN PERMISSIONS
+# GitHub Actions role with full admin
 resource "aws_iam_role" "gha" {
   name = "${local.project}-github-actions-v2"
   assume_role_policy = jsonencode({
@@ -113,8 +109,6 @@ resource "aws_iam_role" "gha" {
     }]
   })
 }
-
-# FULL ADMIN ACCESS FOR GITHUB ACTIONS
 resource "aws_iam_role_policy_attachment" "gha_admin" {
   role       = aws_iam_role.gha.name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
