@@ -16,9 +16,9 @@ import numpy as np
 import librosa
 
 try:
-    from models.audio_cnn import AudioCNN  # your repo layout
+    from models.audio_cnn import AudioCNN
 except ModuleNotFoundError:
-    from src.models.audio_cnn import AudioCNN  # fallback if you move it later
+    from src.models.audio_cnn import AudioCNN
 
 app = FastAPI(title="UrbanSound Inference", version="1.0")
 
@@ -27,43 +27,37 @@ DURATION = 4.0
 N_MELS = 128
 DEVICE = "cpu"
 
+# default labels; will be overridden by classes.json if present
 CLASS_NAMES = [
-    "air_conditioner", "car_horn", "children_playing", "dog_bark", "drilling",
-    "engine_idling", "gun_shot", "jackhammer", "siren", "street_music",
+    "air_conditioner","car_horn","children_playing","dog_bark","drilling",
+    "engine_idling","gun_shot","jackhammer","siren","street_music",
 ]
 
 MODEL: Optional[torch.nn.Module] = None
 
-
-def _instantiate_model() -> torch.nn.Module:
-    """
-    Instantiate AudioCNN no matter what its __init__ is named like.
-    Tries common arg names: n_classes, num_classes, classes, out_dim, n_outputs.
-    Falls back to no-arg constructor.
-    """
+def _instantiate_model(n_classes: int) -> torch.nn.Module:
     init = AudioCNN
     sig = inspect.signature(init)
-    class_count = len(CLASS_NAMES)
-
-    preferred_names = ("n_classes", "num_classes", "classes", "out_dim", "n_outputs")
-    for name in preferred_names:
+    for name in ("n_classes","num_classes","classes","out_dim","n_outputs"):
         if name in sig.parameters:
             try:
-                return init(**{name: class_count})
+                return init(**{name: n_classes})
             except TypeError:
                 pass
-    # try no-arg
     try:
         return init()
     except TypeError as e:
-        raise RuntimeError(
-            f"Cannot construct AudioCNN; __init__ signature is {sig}. "
-            f"Tried {preferred_names} and no-arg."
-        ) from e
-
+        raise RuntimeError(f"Cannot construct AudioCNN; __init__={sig}") from e
 
 def load_model() -> torch.nn.Module:
-    model = _instantiate_model()
+    global CLASS_NAMES
+    # load class names if provided by training
+    classes_path = "/opt/ml/model/classes.json"
+    if os.path.exists(classes_path):
+        with open(classes_path) as f:
+            CLASS_NAMES = json.load(f)
+
+    model = _instantiate_model(n_classes=len(CLASS_NAMES))
     model.to(DEVICE)
     model.eval()
 
@@ -74,19 +68,13 @@ def load_model() -> torch.nn.Module:
             state = state["state_dict"]
         try:
             model.load_state_dict(state, strict=False)
-        except Exception as e:
-            # Try loading under 'model' key, etc.
-            if isinstance(state, dict):
-                for k in ("model", "net", "module", "model_state", "model_state_dict"):
-                    if k in state and isinstance(state[k], dict):
-                        model.load_state_dict(state[k], strict=False)
-                        break
-                else:
-                    raise e
-            else:
-                raise e
+        except Exception:
+            # common nested keys
+            for k in ("model","net","module","model_state","model_state_dict"):
+                if isinstance(state, dict) and k in state and isinstance(state[k], dict):
+                    model.load_state_dict(state[k], strict=False)
+                    break
     return model
-
 
 def preprocess_audio(wav: np.ndarray, sr: int) -> np.ndarray:
     target_len = int(DURATION * SAMPLE_RATE)
@@ -97,14 +85,12 @@ def preprocess_audio(wav: np.ndarray, sr: int) -> np.ndarray:
         wav = np.pad(wav, (0, target_len - len(wav)))
     else:
         wav = wav[:target_len]
-
     S = librosa.feature.melspectrogram(
         y=wav, sr=sr, n_fft=2048, hop_length=512, n_mels=N_MELS, power=2.0
     )
     logS = librosa.power_to_db(S + 1e-9)
     logS = (logS - logS.mean()) / (logS.std() + 1e-6)
     return logS[np.newaxis, np.newaxis, :, :].astype(np.float32)  # (1,1,N_MELS,T)
-
 
 def predict_ndarray(x: np.ndarray) -> Dict[str, Any]:
     with torch.no_grad():
@@ -115,19 +101,18 @@ def predict_ndarray(x: np.ndarray) -> Dict[str, Any]:
     return {
         "label": CLASS_NAMES[top_idx],
         "confidence": float(probs[top_idx]),
-        "probs": {CLASS_NAMES[i]: float(p) for i, p in enumerate(probs)},
+        "classes": CLASS_NAMES,
+        "probs": [float(p) for p in probs],
     }
-
 
 @app.get("/ping")
 def ping() -> PlainTextResponse:
-    return PlainTextResponse("OK", status_code=200 if MODEL is not None else 503)
-
+    # MUST return 200 for SageMaker health checks
+    return PlainTextResponse("OK", status_code=200)
 
 @app.post("/invocations")
 async def invocations(request: Request, file: UploadFile = File(None)):
-    ctype = request.headers.get("content-type", "")
-
+    ctype = (request.headers.get("content-type") or "").lower()
     try:
         if "multipart/form-data" in ctype:
             if file is None:
@@ -139,15 +124,25 @@ async def invocations(request: Request, file: UploadFile = File(None)):
 
         elif "application/json" in ctype:
             payload = await request.json()
-            if "array" in payload:
+            if "audio" in payload:  # base64 bytes (matches Streamlit client)
+                import base64
+                raw = base64.b64decode(payload["audio"])
+                wav, sr = librosa.load(io.BytesIO(raw), sr=None, mono=True)
+                x = preprocess_audio(wav, sr)
+                return JSONResponse(predict_ndarray(x))
+            elif "array" in payload:
                 arr = np.array(payload["array"], dtype=np.float32)
                 sr = int(payload.get("sr", SAMPLE_RATE))
                 x = preprocess_audio(arr, sr)
                 return JSONResponse(predict_ndarray(x))
-            elif "s3_uri" in payload:
-                raise HTTPException(status_code=501, detail="s3_uri handling not implemented")
             else:
                 raise HTTPException(status_code=400, detail="Unsupported JSON payload")
+
+        elif "application/octet-stream" in ctype:
+            raw = await request.body()
+            wav, sr = librosa.load(io.BytesIO(raw), sr=None, mono=True)
+            x = preprocess_audio(wav, sr)
+            return JSONResponse(predict_ndarray(x))
 
         else:
             raise HTTPException(status_code=415, detail=f"Unsupported Content-Type: {ctype}")
@@ -155,16 +150,14 @@ async def invocations(request: Request, file: UploadFile = File(None)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
 
-
-# Lifespan (replaces deprecated on_event)
 @app.on_event("startup")
 def _load_once():
     global MODEL
     MODEL = load_model()
 
-
 if __name__ == "__main__":
+    # Runs both locally and in SageMaker (via entrypoint 'serve')
     uvicorn.run(app, host="0.0.0.0", port=8080)
 
