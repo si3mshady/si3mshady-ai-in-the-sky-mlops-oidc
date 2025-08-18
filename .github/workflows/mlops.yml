@@ -79,11 +79,10 @@ jobs:
           file: docker/training/Dockerfile
           push: true
           provenance: false
+          no-cache: true
           tags: |
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           build-args: |
             GIT_SHA=${{ github.sha }}
 
@@ -95,11 +94,10 @@ jobs:
           file: docker/inference/Dockerfile
           push: true
           provenance: false
+          no-cache: true
           tags: |
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
           build-args: |
             GIT_SHA=${{ github.sha }}
 
