@@ -1,130 +1,151 @@
-import os
-import time
-import json
-import boto3
+#!/usr/bin/env python3
+import os, time, json, argparse
 from datetime import datetime
+import boto3
 
-# SageMaker client
-region      = os.environ["AWS_REGION"]
-sagemaker   = boto3.client("sagemaker", region_name=region)
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--region", required=True)
+    p.add_argument("--bucket", required=True)
+    p.add_argument("--execution-role", required=True)
+    p.add_argument("--train-image-uri", required=True)
+    p.add_argument("--infer-image-uri", required=True)
+    p.add_argument("--endpoint-base", required=True)
+    p.add_argument("--force-retrain", default="false")
+    p.add_argument("--train-instance", default="ml.m5.large")
+    p.add_argument("--serve-instance", default="ml.g4dn.xlarge")
+    p.add_argument("--env", default="staging")
+    p.add_argument("--git-sha", default="local")
+    p.add_argument("--epochs", default=os.getenv("EPOCHS","5"))
+    return p.parse_args()
 
-# Image URIs
-TRAIN_IMAGE = os.environ["TRAIN_IMAGE_URI"]
-INFER_IMAGE = os.environ["INFER_IMAGE_URI"]
-ROLE_ARN    = os.environ["SAGEMAKER_EXECUTION_ROLE_ARN"]
-
-# Real data location
-S3_BUCKET   = os.environ["S3_BUCKET"]
-S3_PREFIX   = os.environ.get("S3_TRAIN_PREFIX", "training/").rstrip("/") + "/"
-
-# Endpoint settings
-ENDPOINT_BASE = os.environ.get("ENDPOINT_NAME_BASE", "urbansound-audio")
-ENDPOINT_ENV  = os.environ.get("ENDPOINT_ENV", "production")
-GIT_SHA       = os.environ.get("GIT_SHA", "local")
-
-# Resources & hyperparameters
-TRAIN_INSTANCE = os.environ.get("INSTANCE_TYPE", "ml.m5.large")
-SERVE_INSTANCE = os.environ.get("SERVE_INSTANCE_TYPE", "ml.g4dn.xlarge")
-EPOCHS         = os.environ.get("EPOCHS", "5")
-
-# Job naming
-ts        = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
-job_name  = f"urbansound-train-{ts}"
-out_path  = f"s3://{S3_BUCKET}/artifacts/{job_name}"
-
-def wait_training(name):
-    sm = boto3.client("sagemaker", region_name=region)
+def wait_training(sm, name):
     while True:
-        desc = sm.describe_training_job(TrainingJobName=name)
-        status = desc["TrainingJobStatus"]
-        print(f"  status={status}")
-        if status in ("Completed","Failed","Stopped"):
-            return desc
+        d = sm.describe_training_job(TrainingJobName=name)
+        s = d["TrainingJobStatus"]
+        print(f"[wait] training status={s}")
+        if s in ("Completed","Failed","Stopped"):
+            return d
         time.sleep(30)
 
-def create_or_update_endpoint(model_name, endpoint_name, instance_type):
-    sm = boto3.client("sagemaker", region_name=region)
-    cfg_name = f"{endpoint_name}-cfg-{ts}"
-    sm.create_endpoint_config(
-        EndpointConfigName=cfg_name,
-        ProductionVariants=[{
-            "VariantName": "AllTraffic",
-            "ModelName":    model_name,
-            "InstanceType": instance_type,
-            "InitialInstanceCount": 1,
-            "InitialVariantWeight": 1.0
-        }],
-    )
+def ensure_endpoint(sm, endpoint_name, cfg_name):
     try:
         sm.describe_endpoint(EndpointName=endpoint_name)
+        print(f"Updating endpoint: {endpoint_name} -> {cfg_name}")
         sm.update_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
     except sm.exceptions.ClientError:
+        print(f"Creating endpoint: {endpoint_name} -> {cfg_name}")
         sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
 
-def main():
-    print("Starting SageMaker training:", job_name)
+def verify_live_image(sm, endpoint_name, must_contain_repo_fragment):
+    ep_cfg = sm.describe_endpoint(EndpointName=endpoint_name)["EndpointConfigName"]
+    mdl = sm.describe_endpoint_config(EndpointConfigName=ep_cfg)["ProductionVariants"][0]["ModelName"]
+    cont = sm.describe_model(ModelName=mdl)["PrimaryContainer"]
+    live_img = cont.get("Image", "")
+    live_art = cont.get("ModelDataUrl", "")
+    print(f"LIVE_IMAGE={live_img}")
+    print(f"LIVE_MODEL_DATA={live_art}")
+    if f"/{must_contain_repo_fragment}:" not in live_img:
+        raise RuntimeError(f"Endpoint attached WRONG image: {live_img} (expected repo fragment '{must_contain_repo_fragment}')")
 
-    # MUST point at your real data prefix so SageMaker sees objects[1]
+def main():
+    a = parse_args()
+    region = a.region
+    sm = boto3.client("sagemaker", region_name=region)
+
+    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    job_name = f"urbansound-train-{ts}"
+    out_path = f"s3://{a.bucket}/artifacts/{job_name}"
+
+    print(f"TRAIN_IMAGE: {a.train_image_uri}")
+    print(f"INFER_IMAGE: {a.infer_image_uri}")
+
+    # ---- TRAIN ----
     input_cfg = [{
         "ChannelName": "training",
         "DataSource": {
             "S3DataSource": {
-                "S3DataType":             "S3Prefix",
-                "S3Uri":                  f"s3://{S3_BUCKET}/{S3_PREFIX}",
-                "S3DataDistributionType": "FullyReplicated"
+                "S3DataType": "S3Prefix",
+                "S3Uri":      f"s3://{a.bucket}/training/",
+                "S3DataDistributionType": "FullyReplicated",
             }
         },
         "InputMode": "File"
     }]
 
-    sagemaker.create_training_job(
+    print(f"Starting training job: {job_name}")
+    sm.create_training_job(
         TrainingJobName=job_name,
-        RoleArn=ROLE_ARN,
+        RoleArn=a.execution_role,
         AlgorithmSpecification={
-            "TrainingImage": TRAIN_IMAGE,
-            "TrainingInputMode": "File"
+            "TrainingImage": a.train_image_uri,
+            "TrainingInputMode": "File",
         },
-        InputDataConfig=input_cfg,                # now valid
+        InputDataConfig=input_cfg,
         OutputDataConfig={"S3OutputPath": out_path},
         ResourceConfig={
-            "InstanceType": TRAIN_INSTANCE,
+            "InstanceType": a.train_instance,
             "InstanceCount": 1,
-            "VolumeSizeInGB": 50
+            "VolumeSizeInGB": 50,
         },
         StoppingCondition={"MaxRuntimeInSeconds": 2*3600},
-        HyperParameters={"EPOCHS": EPOCHS},
+        HyperParameters={"EPOCHS": str(a.epochs)},
         Environment={
-            "S3_TRAIN_BUCKET": S3_BUCKET,
-            "S3_TRAIN_PREFIX": S3_PREFIX,
-            "SM_MODEL_DIR":     "/opt/ml/model"
+            "S3_TRAIN_BUCKET": a.bucket,
+            "S3_TRAIN_PREFIX": "training/",
+            "SM_MODEL_DIR": "/opt/ml/model",
         },
         Tags=[
-            {"Key": "project", "Value": "urbansound"},
-            {"Key": "commit",  "Value": GIT_SHA},
-            {"Key": "env",     "Value": ENDPOINT_ENV}
-        ]
+            {"Key":"project","Value":"urbansound"},
+            {"Key":"commit","Value":a.git_sha},
+            {"Key":"env","Value":a.env},
+        ],
     )
 
-    desc = wait_training(job_name)
+    desc = wait_training(sm, job_name)
     if desc["TrainingJobStatus"] != "Completed":
         raise RuntimeError(f"Training failed: {desc.get('FailureReason')}")
-
     artifact = desc["ModelArtifacts"]["S3ModelArtifacts"]
-    print("Model artifact:", artifact)
+    print(f"Model artifact: {artifact}")
 
-    # Deploy model
-    model_name = f"{ENDPOINT_BASE}-mdl-{ts}"
-    container  = {
-        "Image":        INFER_IMAGE,
-        "Mode":         "SingleModel",
-        "ModelDataUrl": artifact,
-        "Environment":  {"SAGEMAKER_PROGRAM":"serve.py"}
-    }
-    sagemaker.create_model(ModelName=model_name, ExecutionRoleArn=ROLE_ARN, PrimaryContainer=container)
-    endpoint = f"{ENDPOINT_BASE}-{ENDPOINT_ENV}"
-    create_or_update_endpoint(model_name, endpoint, SERVE_INSTANCE)
+    # ---- MODEL (INFERENCE IMAGE) ----
+    model_name = f"{a.endpoint_base}-mdl-{ts}"
+    print(f"Creating model: {model_name} (INFER image)")
+    sm.create_model(
+        ModelName=model_name,
+        ExecutionRoleArn=a.execution_role,
+        PrimaryContainer={
+            "Image": a.infer_image_uri,
+            "Mode": "SingleModel",
+            "ModelDataUrl": artifact,
+        },
+    )
 
-    print("Endpoint live at:", endpoint)
+    # ---- ENDPOINT CONFIG + ENDPOINT ----
+    endpoint_name = f"{a.endpoint_base}-{a.env}"
+    cfg_name = f"{endpoint_name}-cfg-{ts}"
+    print(f"Creating endpoint-config: {cfg_name}")
+    sm.create_endpoint_config(
+        EndpointConfigName=cfg_name,
+        ProductionVariants=[{
+            "VariantName": "AllTraffic",
+            "ModelName": model_name,
+            "InstanceType": a.serve_instance,
+            "InitialInstanceCount": 1,
+            "InitialVariantWeight": 1.0,
+            # critical so uvicorn+torch can start cleanly
+            "ContainerStartupHealthCheckTimeoutInSeconds": 600,
+        }],
+    )
 
-if __name__=="__main__":
+    ensure_endpoint(sm, endpoint_name, cfg_name)
+    print("Waiting for endpoint InService...")
+    sm.get_waiter("endpoint_in_service").wait(EndpointName=endpoint_name)
+
+    # ---- VERIFY live image is inference repo ----
+    verify_live_image(sm, endpoint_name, must_contain_repo_fragment="urbansound-infer")
+    print(f"Endpoint live: {endpoint_name}")
+
+if __name__ == "__main__":
     main()
+

@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
-set -e
-if [ "$1" = "serve" ] || [ -z "$1" ]; then
-  exec python /opt/ml/code/serve.py
-else
-  exec "$@"
+set -euo pipefail
+
+cmd="${1:-serve}"
+
+if [[ "$cmd" == "serve" ]]; then
+  # Start FastAPI on 8080 for SageMaker
+  exec python -m uvicorn serve:app --host 0.0.0.0 --port 8080
 fi
+
+# Allow custom commands if explicitly provided
+exec "$@"
 

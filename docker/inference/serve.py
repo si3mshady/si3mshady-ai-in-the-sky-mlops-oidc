@@ -1,4 +1,3 @@
-# /opt/ml/code/serve.py
 import io, os, sys, json, inspect
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
@@ -12,6 +11,7 @@ for p in (CODE_DIR, SRC_DIR):
         sys.path.insert(0, p)
 
 import torch
+torch.set_num_threads(1)
 import numpy as np
 import librosa
 
@@ -27,7 +27,6 @@ DURATION = 4.0
 N_MELS = 128
 DEVICE = "cpu"
 
-# default labels; will be overridden by classes.json if present
 CLASS_NAMES = [
     "air_conditioner","car_horn","children_playing","dog_bark","drilling",
     "engine_idling","gun_shot","jackhammer","siren","street_music",
@@ -51,7 +50,6 @@ def _instantiate_model(n_classes: int) -> torch.nn.Module:
 
 def load_model() -> torch.nn.Module:
     global CLASS_NAMES
-    # load class names if provided by training
     classes_path = "/opt/ml/model/classes.json"
     if os.path.exists(classes_path):
         with open(classes_path) as f:
@@ -69,7 +67,6 @@ def load_model() -> torch.nn.Module:
         try:
             model.load_state_dict(state, strict=False)
         except Exception:
-            # common nested keys
             for k in ("model","net","module","model_state","model_state_dict"):
                 if isinstance(state, dict) and k in state and isinstance(state[k], dict):
                     model.load_state_dict(state[k], strict=False)
@@ -90,7 +87,7 @@ def preprocess_audio(wav: np.ndarray, sr: int) -> np.ndarray:
     )
     logS = librosa.power_to_db(S + 1e-9)
     logS = (logS - logS.mean()) / (logS.std() + 1e-6)
-    return logS[np.newaxis, np.newaxis, :, :].astype(np.float32)  # (1,1,N_MELS,T)
+    return logS[np.newaxis, np.newaxis, :, :].astype(np.float32)
 
 def predict_ndarray(x: np.ndarray) -> Dict[str, Any]:
     with torch.no_grad():
@@ -107,7 +104,7 @@ def predict_ndarray(x: np.ndarray) -> Dict[str, Any]:
 
 @app.get("/ping")
 def ping() -> PlainTextResponse:
-    # MUST return 200 for SageMaker health checks
+    # Keep this ultra-light so health checks pass even if model isn’t loaded yet.
     return PlainTextResponse("OK", status_code=200)
 
 @app.post("/invocations")
@@ -124,7 +121,7 @@ async def invocations(request: Request, file: UploadFile = File(None)):
 
         elif "application/json" in ctype:
             payload = await request.json()
-            if "audio" in payload:  # base64 bytes (matches Streamlit client)
+            if "audio" in payload:
                 import base64
                 raw = base64.b64decode(payload["audio"])
                 wav, sr = librosa.load(io.BytesIO(raw), sr=None, mono=True)
@@ -158,6 +155,5 @@ def _load_once():
     MODEL = load_model()
 
 if __name__ == "__main__":
-    # Runs both locally and in SageMaker (via entrypoint 'serve')
     uvicorn.run(app, host="0.0.0.0", port=8080)
 

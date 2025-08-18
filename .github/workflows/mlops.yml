@@ -6,12 +6,9 @@ permissions:
 
 on:
   push:
-    branches:
-      - main
-      - develop
+    branches: [ main, develop ]
   pull_request:
-    branches:
-      - main
+    branches: [ main ]
   workflow_dispatch:
     inputs:
       force_retrain:
@@ -21,9 +18,7 @@ on:
         description: "Endpoint environment"
         default: "staging"
         type: choice
-        options:
-          - staging
-          - production
+        options: [ staging, production ]
       train_instance_type:
         description: "SageMaker Training InstanceType"
         default: "ml.m5.large"
@@ -53,26 +48,17 @@ jobs:
     outputs:
       train-image-uri: ${{ steps.out-train.outputs.TRAIN_IMAGE_URI }}
       infer-image-uri: ${{ steps.out-infer.outputs.INFER_IMAGE_URI }}
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
-
-      - name: ECR Login
-        uses: aws-actions/amazon-ecr-login@v2
+      - uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build & Push TRAIN image
-        id: build-train
         uses: docker/build-push-action@v6
         with:
           context: docker/training
@@ -87,7 +73,6 @@ jobs:
             GIT_SHA=${{ github.sha }}
 
       - name: Build & Push INFER image
-        id: build-infer
         uses: docker/build-push-action@v6
         with:
           context: docker/inference
@@ -113,49 +98,53 @@ jobs:
     name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+      - run: pip install boto3 botocore pyyaml
 
-      - name: Install dependencies
-        run: pip install boto3 botocore pyyaml
-
-      - name: Configure AWS (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
+      - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
+      - name: Show image URIs
+        run: |
+          echo "TRAIN_IMAGE_URI=${{ needs.build-and-push-images.outputs.train-image-uri }}"
+          echo "INFER_IMAGE_URI=${{ needs.build-and-push-images.outputs.infer-image-uri }}"
+
       - name: Train + (Re)Deploy Endpoint
         env:
           TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.train-image-uri }}
           INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.infer-image-uri }}
-          AWS_REGION: ${{ env.AWS_REGION }}
-          S3_BUCKET: ${{ env.S3_BUCKET }}
-          SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
-          ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
-          FORCE_RETRAIN: ${{ github.event.inputs.force_retrain || 'false' }}
-          INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type || 'ml.m5.large' }}
-          SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type || 'ml.g4dn.xlarge' }}
-          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env || 'staging' }}
-          GIT_SHA: ${{ github.sha }}
         run: |
           python scripts/sm_train_and_deploy.py \
-            --region $AWS_REGION \
-            --bucket $S3_BUCKET \
-            --execution-role $SAGEMAKER_EXECUTION_ROLE_ARN \
-            --train-image-uri $TRAIN_IMAGE_URI \
-            --infer-image-uri $INFER_IMAGE_URI \
-            --endpoint-base $ENDPOINT_NAME_BASE \
-            --force-retrain $FORCE_RETRAIN \
-            --train-instance $INSTANCE_TYPE \
-            --serve-instance $SERVE_INSTANCE_TYPE \
-            --env $ENDPOINT_ENV \
-            --git-sha $GIT_SHA
+            --region "${{ env.AWS_REGION }}" \
+            --bucket "${{ env.S3_BUCKET }}" \
+            --execution-role "${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}" \
+            --train-image-uri "$TRAIN_IMAGE_URI" \
+            --infer-image-uri "$INFER_IMAGE_URI" \
+            --endpoint-base "${{ env.ENDPOINT_NAME_BASE }}" \
+            --force-retrain "${{ github.event.inputs.force_retrain || 'false' }}" \
+            --train-instance "${{ github.event.inputs.train_instance_type || 'ml.m5.large' }}" \
+            --serve-instance "${{ github.event.inputs.serve_instance_type || 'ml.g4dn.xlarge' }}" \
+            --env "${{ github.event.inputs.endpoint_env || 'staging' }}" \
+            --git-sha "${{ github.sha }}"
+
+      - name: Verify endpoint uses inference image
+        env:
+          EP_ENV: ${{ github.event.inputs.endpoint_env || 'staging' }}
+        run: |
+          EP="${{ env.ENDPOINT_NAME_BASE }}-${EP_ENV}"
+          IMG=$(aws sagemaker describe-endpoint --region "${{ env.AWS_REGION }}" --endpoint-name "$EP" --query EndpointConfigName --output text \
+            | xargs -I{} aws sagemaker describe-endpoint-config --region "${{ env.AWS_REGION }}" --endpoint-config-name {} --query 'ProductionVariants[0].ModelName' --output text \
+            | xargs -I{} aws sagemaker describe-model --region "${{ env.AWS_REGION }}" --model-name {} --query 'PrimaryContainer.Image' --output text)
+          echo "LIVE_IMAGE=$IMG"
+          case "$IMG" in
+            *"/${{ env.INFER_ECR_REPOSITORY }}:"*) echo "OK: inference image attached.";;
+            *) echo "ERROR: Endpoint not using inference image: $IMG" >&2; exit 1;;
+          esac
+
