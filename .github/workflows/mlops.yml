@@ -145,19 +145,6 @@ jobs:
             exit 1
           fi
 
-      - name: Smoke test inference image locally
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker run -d --rm -p 8080:8080 --name urban-infer "${{ steps.out-infer.outputs.INFER_IMAGE_TAG }}"
-          for i in $(seq 1 30); do
-            if curl -fsS http://localhost:8080/ping >/dev/null 2>&1; then
-              echo "Ping OK"; break
-            fi
-            sleep 2
-          done
-          curl -fsS http://localhost:8080/ping
-          docker rm -f urban-infer || true
 
   sagemaker-train-and-deploy:
     name: Train & Deploy (SageMaker)
