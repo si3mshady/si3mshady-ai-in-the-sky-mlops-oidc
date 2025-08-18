@@ -1,8 +1,9 @@
-fastapi==0.110.0
-uvicorn[standard]==0.29.0
-boto3>=1.34.0
-numpy>=1.26,<3
-soundfile>=0.12
+flask==3.0.3
+numpy==1.26.4
+soundfile==0.12.1
 librosa==0.10.2.post1
-torch==2.3.1
+# torch is optional; if present and the file is TorchScript we’ll try it.
+# Comment it out if you want a smaller image; the app still works without it.
+torch==2.2.2
+boto3==1.34.161
 

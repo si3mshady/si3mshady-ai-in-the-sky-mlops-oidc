@@ -2,29 +2,26 @@ FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/opt/ml/code \
-    UVICORN_WORKERS=1
+    MODEL_DIR=/opt/ml/model
 
-# audio libs + curl for healthcheck
+# Audio libs + curl for healthchecks
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsndfile1 ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ml/code
 
-# install deps
+# Python deps
 COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install --upgrade pip \
- && pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
-# app
-COPY serve.py ./serve.py
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# App
+COPY app.py ./app.py
 
 EXPOSE 8080
+# If app is up, this returns 200 and lets SageMaker mark container healthy
 HEALTHCHECK --interval=30s --timeout=5s --retries=20 CMD curl -fsS http://localhost:8080/ping || exit 1
 
-ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
-CMD ["serve"]
+# No wrapper scripts, no uvicorn: just run the Flask app
+CMD ["python", "app.py"]
 
