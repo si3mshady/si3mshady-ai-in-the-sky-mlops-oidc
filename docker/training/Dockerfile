@@ -4,27 +4,36 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# libs for librosa/soundfile
+# libs for soundfile/librosa (mp3 via librosa/audioread uses ffmpeg)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsndfile1 ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ml/code
 
-# 1) Install Python deps
+# 1) Install Python deps (pin librosa to the API you’re using)
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN python -m pip install --upgrade pip \
+ && pip install --no-cache-dir -r /tmp/requirements.txt \
+ && python - <<'PY'
+import sys, librosa, torch, soundfile
+print("[build-check] python:", sys.version.split()[0])
+print("[build-check] librosa:", librosa.__version__)
+print("[build-check] torch:", torch.__version__)
+print("[build-check] soundfile:", soundfile.__version__)
+PY
 
 # 2) Copy training script and model code
-#    You have audio_cnn.py in the build context alongside entryPoint.py.
-#    We place it under /opt/ml/code/models/audio_cnn.py so "from models.audio_cnn import AudioCNN" works.
 COPY entryPoint.py ./train.py
 COPY audio_cnn.py ./models/audio_cnn.py
 
-# Make sure /opt/ml/code is on sys.path
+# 3) Optional: surface the git SHA from your workflow for log tracing
+ARG GIT_SHA=dev
+ENV GIT_SHA=$GIT_SHA
+
+# 4) Ensure /opt/ml/code is importable
 ENV PYTHONPATH=/opt/ml/code
 
-# SageMaker expects this, but ENTRYPOINT also runs it locally
+# 5) Run the program (SageMaker job will execute the container entrypoint)
 ENV SAGEMAKER_PROGRAM=train.py
 ENTRYPOINT ["python", "train.py"]
-
