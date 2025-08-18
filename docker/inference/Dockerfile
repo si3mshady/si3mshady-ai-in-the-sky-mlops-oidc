@@ -4,24 +4,23 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     MODEL_DIR=/opt/ml/model
 
-# Audio libs + curl for healthchecks
+# Audio libs for librosa + curl for quick tests
 RUN apt-get update && apt-get install -y --no-install-recommends \
       libsndfile1 ffmpeg curl \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/ml/code
 
-# Python deps
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+# Install minimal deps (no torch required for healthcheck/stub)
+RUN pip install --no-cache-dir \
+      flask numpy librosa soundfile
 
-# App
-COPY app.py ./app.py
+# App & entrypoint
+COPY app.py /opt/ml/code/app.py
+COPY start.sh /usr/local/bin/start.sh
+RUN chmod +x /usr/local/bin/start.sh
 
 EXPOSE 8080
-# If app is up, this returns 200 and lets SageMaker mark container healthy
-HEALTHCHECK --interval=30s --timeout=5s --retries=20 CMD curl -fsS http://localhost:8080/ping || exit 1
-
-# No wrapper scripts, no uvicorn: just run the Flask app
-CMD ["python", "app.py"]
+ENTRYPOINT ["/usr/local/bin/start.sh"]
+CMD ["serve"]
 
