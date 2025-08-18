@@ -1,4 +1,4 @@
-name: UrbanSound • SageMaker OIDC MLOps
+name: UrbanSound SageMaker OIDC MLOps
 
 permissions:
   id-token: write
@@ -6,9 +6,9 @@ permissions:
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
   workflow_dispatch:
     inputs:
       force_retrain:
@@ -18,7 +18,7 @@ on:
         description: "Endpoint environment"
         default: "staging"
         type: choice
-        options: [ staging, production ]
+        options: [staging, production]
       train_instance_type:
         description: "SageMaker Training InstanceType"
         default: "ml.m5.large"
@@ -46,8 +46,10 @@ jobs:
     name: Build & Push (ECR)
     runs-on: ubuntu-latest
     outputs:
-      TRAIN_IMAGE_URI_DIGEST: ${{ steps.digest-train.outputs.TRAIN_IMAGE_URI }}
-      INFER_IMAGE_URI_DIGEST: ${{ steps.digest-infer.outputs.INFER_IMAGE_URI }}
+      train-image-tag: ${{ steps.out-train.outputs.TRAIN_IMAGE_TAG }}
+      infer-image-tag: ${{ steps.out-infer.outputs.INFER_IMAGE_TAG }}
+      train-image-digest: ${{ steps.digest-train.outputs.TRAIN_IMAGE_DIGEST }}
+      infer-image-digest: ${{ steps.digest-infer.outputs.INFER_IMAGE_DIGEST }}
 
     steps:
       - name: Checkout
@@ -74,7 +76,6 @@ jobs:
           file: docker/training/Dockerfile
           push: true
           provenance: false
-          no-cache: true
           tags: |
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:latest
@@ -89,64 +90,71 @@ jobs:
           file: docker/inference/Dockerfile
           push: true
           provenance: false
-          no-cache: true
           tags: |
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
 
-      # Resolve immutable digests (no tag drift)
+      - name: Output Train tag
+        id: out-train
+        shell: bash
+        run: |
+          echo "TRAIN_IMAGE_TAG=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Output Infer tag
+        id: out-infer
+        shell: bash
+        run: |
+          echo "INFER_IMAGE_TAG=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
       - name: Resolve TRAIN image digest
         id: digest-train
+        shell: bash
         run: |
-          DIG=$(aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --repository-name "$TRAIN_ECR_REPOSITORY" \
-            --image-ids imageTag=${{ github.sha }} \
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.TRAIN_ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" \
             --query 'imageDetails[0].imageDigest' --output text)
-          echo "TRAIN_IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${TRAIN_ECR_REPOSITORY}@${DIG}" >> $GITHUB_OUTPUT
+          FULL="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}@${DIGEST}"
+          echo "TRAIN_IMAGE_DIGEST=${FULL}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve INFER image digest
         id: digest-infer
+        shell: bash
         run: |
-          DIG=$(aws ecr describe-images \
-            --region "$AWS_REGION" \
-            --repository-name "$INFER_ECR_REPOSITORY" \
-            --image-ids imageTag=${{ github.sha }} \
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.INFER_ECR_REPOSITORY }}" \
+            --image-ids imageTag="${{ github.sha }}" \
             --query 'imageDetails[0].imageDigest' --output text)
-          echo "INFER_IMAGE_URI=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${INFER_ECR_REPOSITORY}@${DIG}" >> $GITHUB_OUTPUT
+          FULL="${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}@${DIGEST}"
+          echo "INFER_IMAGE_DIGEST=${FULL}" >> "$GITHUB_OUTPUT"
 
-      # Hard guard: inference digest must NOT equal training digest
-      - name: Guard against tag/digest collision
+      - name: Guardrail: training and inference are different images
+        shell: bash
         run: |
-          T=$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$TRAIN_ECR_REPOSITORY" --image-ids imageTag=${{ github.sha }} --query 'imageDetails[0].imageDigest' --output text)
-          I=$(aws ecr describe-images --region "$AWS_REGION" --repository-name "$INFER_ECR_REPOSITORY" --image-ids imageTag=${{ github.sha }} --query 'imageDetails[0].imageDigest' --output text)
-          echo "train digest: $T"
-          echo "infer digest: $I"
-          test "$T" != "$I" || { echo "FATAL: training and inference images have the SAME digest"; exit 1; }
+          if [ "${{ steps.digest-train.outputs.TRAIN_IMAGE_DIGEST }}" = "${{ steps.digest-infer.outputs.INFER_IMAGE_DIGEST }}" ]; then
+            echo "Train and Infer images share the same digest. Aborting."
+            exit 1
+          fi
 
-      # Sanity check the inference image contains serve.py and answers /ping
-      - name: Sanity check inference image
+      - name: Smoke test inference image locally
+        shell: bash
         run: |
-          INFER_IMAGE_URI="${{ steps.digest-infer.outputs.INFER_IMAGE_URI }}"
-          docker pull "$INFER_IMAGE_URI"
-          docker run --rm "$INFER_IMAGE_URI" python - <<'PY'
-import os, sys
-ok = os.path.exists('/opt/ml/code/serve.py')
-print("serve.py exists:", ok)
-sys.exit(0 if ok else 1)
-PY
-          CID=$(docker run -d -p 8080:8080 "$INFER_IMAGE_URI")
-          sleep 3
-          curl -fsS http://127.0.0.1:8080/ping
-          docker rm -f "$CID" >/dev/null
+          docker run -d --rm -p 8080:8080 --name urban-infer "${{ steps.out-infer.outputs.INFER_IMAGE_TAG }}" || exit 1
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8080/ping >/dev/null 2>&1; then
+              echo "Ping OK"; break
+            fi
+            sleep 2
+          done
+          curl -fsS http://localhost:8080/ping || (docker logs urban-infer; exit 1)
+          docker rm -f urban-infer || true
 
   sagemaker-train-and-deploy:
     name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -157,7 +165,8 @@ PY
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Install deps
-        run: pip install boto3 botocore pyyaml
+        shell: bash
+        run: pip install boto3 botocore
 
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -166,35 +175,30 @@ PY
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
 
-      - name: Train + (Re)Deploy Endpoint (pinned digests)
+      - name: Train + Deploy
+        shell: bash
         env:
-          TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.TRAIN_IMAGE_URI_DIGEST }}
-          INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.INFER_IMAGE_URI_DIGEST }}
           AWS_REGION: ${{ env.AWS_REGION }}
           S3_BUCKET: ${{ env.S3_BUCKET }}
           SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
           ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
-          FORCE_RETRAIN: ${{ github.event.inputs.force_retrain || 'false' }}
+          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env || 'staging' }}
           INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type || 'ml.m5.large' }}
           SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type || 'ml.g4dn.xlarge' }}
-          ENDPOINT_ENV: ${{ github.event.inputs.endpoint_env || 'staging' }}
           GIT_SHA: ${{ github.sha }}
+          TRAIN_IMAGE_DIGEST: ${{ needs.build-and-push-images.outputs.train-image-digest }}
+          INFER_IMAGE_DIGEST: ${{ needs.build-and-push-images.outputs.infer-image-digest }}
         run: |
           python scripts/sm_train_and_deploy.py \
-            --region $AWS_REGION \
-            --bucket $S3_BUCKET \
-            --execution-role $SAGEMAKER_EXECUTION_ROLE_ARN \
-            --train-image-uri $TRAIN_IMAGE_URI \
-            --infer-image-uri $INFER_IMAGE_URI \
-            --endpoint-base $ENDPOINT_NAME_BASE \
-            --force-retrain $FORCE_RETRAIN \
-            --train-instance $INSTANCE_TYPE \
-            --serve-instance $SERVE_INSTANCE_TYPE \
-            --env $ENDPOINT_ENV \
-            --git-sha $GIT_SHA
-
-
-
-
-
+            --region "$AWS_REGION" \
+            --bucket "$S3_BUCKET" \
+            --execution-role "$SAGEMAKER_EXECUTION_ROLE_ARN" \
+            --train-image-uri "$TRAIN_IMAGE_DIGEST" \
+            --infer-image-uri "$INFER_IMAGE_DIGEST" \
+            --endpoint-base "$ENDPOINT_NAME_BASE" \
+            --force-retrain "${{ github.event.inputs.force_retrain || 'false' }}" \
+            --train-instance "$INSTANCE_TYPE" \
+            --serve-instance "$SERVE_INSTANCE_TYPE" \
+            --env "$ENDPOINT_ENV" \
+            --git-sha "$GIT_SHA"
 

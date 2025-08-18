@@ -38,8 +38,7 @@ def ensure_endpoint(sm, endpoint_name, cfg_name):
         sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
 
 def verify_live_image(sm, endpoint_name, must_contain_repo_fragment):
-    ep = sm.describe_endpoint(EndpointName=endpoint_name)
-    ep_cfg = ep["EndpointConfigName"]
+    ep_cfg = sm.describe_endpoint(EndpointName=endpoint_name)["EndpointConfigName"]
     mdl = sm.describe_endpoint_config(EndpointConfigName=ep_cfg)["ProductionVariants"][0]["ModelName"]
     cont = sm.describe_model(ModelName=mdl)["PrimaryContainer"]
     live_img = cont.get("Image", "")
@@ -47,15 +46,11 @@ def verify_live_image(sm, endpoint_name, must_contain_repo_fragment):
     print(f"LIVE_IMAGE={live_img}")
     print(f"LIVE_MODEL_DATA={live_art}")
     if f"/{must_contain_repo_fragment}@" not in live_img and f"/{must_contain_repo_fragment}:" not in live_img:
-        raise RuntimeError(
-            f"WRONG image attached to endpoint: {live_img} "
-            f"(expected repo containing '{must_contain_repo_fragment}')"
-        )
+        raise RuntimeError(f"Endpoint attached WRONG image: {live_img} (expected repo fragment '{must_contain_repo_fragment}')")
 
 def main():
     a = parse_args()
-    region = a.region
-    sm = boto3.client("sagemaker", region_name=region)
+    sm = boto3.client("sagemaker", region_name=a.region)
 
     ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
     job_name = f"urbansound-train-{ts}"
@@ -119,9 +114,10 @@ def main():
         ModelName=model_name,
         ExecutionRoleArn=a.execution_role,
         PrimaryContainer={
-            "Image": a.infer_image_uri,
+            "Image": a.infer_image_uri,        # <-- DIGEST-PINNED INFER IMAGE
             "Mode": "SingleModel",
             "ModelDataUrl": artifact,
+            "Environment": {"SAGEMAKER_PROGRAM": "serve.py"}
         },
     )
 
@@ -145,7 +141,7 @@ def main():
     print("Waiting for endpoint InService...")
     sm.get_waiter("endpoint_in_service").wait(EndpointName=endpoint_name)
 
-    # ---- VERIFY the live image repo is *inference*
+    # ---- VERIFY live image is inference repo ----
     verify_live_image(sm, endpoint_name, must_contain_repo_fragment="urbansound-infer")
     print(f"Endpoint live: {endpoint_name}")
 
