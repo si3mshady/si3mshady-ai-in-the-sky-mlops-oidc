@@ -38,15 +38,19 @@ def ensure_endpoint(sm, endpoint_name, cfg_name):
         sm.create_endpoint(EndpointName=endpoint_name, EndpointConfigName=cfg_name)
 
 def verify_live_image(sm, endpoint_name, must_contain_repo_fragment):
-    ep_cfg = sm.describe_endpoint(EndpointName=endpoint_name)["EndpointConfigName"]
+    ep = sm.describe_endpoint(EndpointName=endpoint_name)
+    ep_cfg = ep["EndpointConfigName"]
     mdl = sm.describe_endpoint_config(EndpointConfigName=ep_cfg)["ProductionVariants"][0]["ModelName"]
     cont = sm.describe_model(ModelName=mdl)["PrimaryContainer"]
     live_img = cont.get("Image", "")
     live_art = cont.get("ModelDataUrl", "")
     print(f"LIVE_IMAGE={live_img}")
     print(f"LIVE_MODEL_DATA={live_art}")
-    if f"/{must_contain_repo_fragment}:" not in live_img:
-        raise RuntimeError(f"Endpoint attached WRONG image: {live_img} (expected repo fragment '{must_contain_repo_fragment}')")
+    if f"/{must_contain_repo_fragment}@" not in live_img and f"/{must_contain_repo_fragment}:" not in live_img:
+        raise RuntimeError(
+            f"WRONG image attached to endpoint: {live_img} "
+            f"(expected repo containing '{must_contain_repo_fragment}')"
+        )
 
 def main():
     a = parse_args()
@@ -133,7 +137,6 @@ def main():
             "InstanceType": a.serve_instance,
             "InitialInstanceCount": 1,
             "InitialVariantWeight": 1.0,
-            # critical so uvicorn+torch can start cleanly
             "ContainerStartupHealthCheckTimeoutInSeconds": 600,
         }],
     )
@@ -142,7 +145,7 @@ def main():
     print("Waiting for endpoint InService...")
     sm.get_waiter("endpoint_in_service").wait(EndpointName=endpoint_name)
 
-    # ---- VERIFY live image is inference repo ----
+    # ---- VERIFY the live image repo is *inference*
     verify_live_image(sm, endpoint_name, must_contain_repo_fragment="urbansound-infer")
     print(f"Endpoint live: {endpoint_name}")
 

@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cmd="${1:-serve}"
+CMD="${1:-serve}"
 
-if [[ "$cmd" == "serve" ]]; then
-  # Start FastAPI on 8080 for SageMaker
-  exec python -m uvicorn serve:app --host 0.0.0.0 --port 8080
+if [[ "$CMD" == "serve" ]]; then
+  # start FastAPI + show access logs so you SEE inference logs in CWL
+  exec uvicorn serve:app --host 0.0.0.0 --port 8080 --log-level info
 fi
 
-# Allow custom commands if explicitly provided
 exec "$@"
 

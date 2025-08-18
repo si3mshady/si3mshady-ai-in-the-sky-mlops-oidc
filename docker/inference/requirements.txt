@@ -1,8 +1,8 @@
-fastapi>=0.110
-uvicorn>=0.29
-boto3>=1.34
-numpy>=1.26
-librosa==0.10.2.post1
+fastapi==0.110.0
+uvicorn[standard]==0.29.0
+boto3>=1.34.0
+numpy>=1.26,<3
 soundfile>=0.12
-torch>=2.3  # CPU wheel from PyPI
+librosa==0.10.2.post1
+torch==2.3.1
 

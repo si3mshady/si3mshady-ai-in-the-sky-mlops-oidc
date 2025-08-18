@@ -1,9 +1,9 @@
-import io, os, sys, json, inspect
+import io, os, sys, json, inspect, logging
 from typing import Dict, Any, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
-import uvicorn
 
+# import path
 CODE_DIR = "/opt/ml/code"
 SRC_DIR = os.path.join(CODE_DIR, "src")
 for p in (CODE_DIR, SRC_DIR):
@@ -11,14 +11,17 @@ for p in (CODE_DIR, SRC_DIR):
         sys.path.insert(0, p)
 
 import torch
-torch.set_num_threads(1)
 import numpy as np
 import librosa
 
+# try local first, fallback to src layout
 try:
     from models.audio_cnn import AudioCNN
 except ModuleNotFoundError:
-    from src.models.audio_cnn import AudioCNN
+    from src.models.audio_cnn import AudioCNN  # type: ignore
+
+log = logging.getLogger("inference")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 
 app = FastAPI(title="UrbanSound Inference", version="1.0")
 
@@ -43,14 +46,13 @@ def _instantiate_model(n_classes: int) -> torch.nn.Module:
                 return init(**{name: n_classes})
             except TypeError:
                 pass
-    try:
-        return init()
-    except TypeError as e:
-        raise RuntimeError(f"Cannot construct AudioCNN; __init__={sig}") from e
+    return init()  # type: ignore
 
 def load_model() -> torch.nn.Module:
     global CLASS_NAMES
     classes_path = "/opt/ml/model/classes.json"
+    weights_path = "/opt/ml/model/model.pt"
+
     if os.path.exists(classes_path):
         with open(classes_path) as f:
             CLASS_NAMES = json.load(f)
@@ -59,18 +61,22 @@ def load_model() -> torch.nn.Module:
     model.to(DEVICE)
     model.eval()
 
-    weights_path = "/opt/ml/model/model.pt"
     if os.path.exists(weights_path):
         state = torch.load(weights_path, map_location=DEVICE)
         if isinstance(state, dict) and "state_dict" in state:
             state = state["state_dict"]
         try:
             model.load_state_dict(state, strict=False)
+            log.info("Loaded weights from %s", weights_path)
         except Exception:
             for k in ("model","net","module","model_state","model_state_dict"):
                 if isinstance(state, dict) and k in state and isinstance(state[k], dict):
                     model.load_state_dict(state[k], strict=False)
+                    log.info("Loaded nested weights from key '%s' in %s", k, weights_path)
                     break
+    else:
+        log.warning("No weights found at %s; model will output random-ish logits", weights_path)
+
     return model
 
 def preprocess_audio(wav: np.ndarray, sr: int) -> np.ndarray:
@@ -104,7 +110,6 @@ def predict_ndarray(x: np.ndarray) -> Dict[str, Any]:
 
 @app.get("/ping")
 def ping() -> PlainTextResponse:
-    # Keep this ultra-light so health checks pass even if model isn’t loaded yet.
     return PlainTextResponse("OK", status_code=200)
 
 @app.post("/invocations")
@@ -147,13 +152,12 @@ async def invocations(request: Request, file: UploadFile = File(None)):
     except HTTPException:
         raise
     except Exception as e:
+        log.exception("inference_error")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.on_event("startup")
 def _load_once():
     global MODEL
     MODEL = load_model()
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    log.info("Inference server ready. classes=%s", CLASS_NAMES)
 
