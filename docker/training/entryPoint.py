@@ -290,7 +290,7 @@ def main():
     classes = [
         "air_conditioner","car_horn","children_playing","dog_bark","drilling",
         "engine_idling","gun_shot","jackhammer","siren","street_music","alarms","crowd",
-        "domestic","gunfire","police","grinding"
+        "domestic","gunfire","police","grinding",'forced_entry"
     ]
 
     try:
