@@ -30,9 +30,11 @@ DURATION = 4.0
 N_MELS = 128
 DEVICE = "cpu"
 
+# 🔒 Hard-coded 17 classes; do NOT auto-load from classes.json
 CLASS_NAMES = [
     "air_conditioner","car_horn","children_playing","dog_bark","drilling",
     "engine_idling","gun_shot","jackhammer","siren","street_music",
+    "alarms","crowd","domestic","gunfire","police","grinding","forced_entry"
 ]
 
 MODEL: Optional[torch.nn.Module] = None
@@ -49,13 +51,8 @@ def _instantiate_model(n_classes: int) -> torch.nn.Module:
     return init()  # type: ignore
 
 def load_model() -> torch.nn.Module:
-    global CLASS_NAMES
-    classes_path = "/opt/ml/model/classes.json"
+    # NOTE: do not load/override CLASS_NAMES from JSON
     weights_path = "/opt/ml/model/model.pt"
-
-    if os.path.exists(classes_path):
-        with open(classes_path) as f:
-            CLASS_NAMES = json.load(f)
 
     model = _instantiate_model(n_classes=len(CLASS_NAMES))
     model.to(DEVICE)
