@@ -289,7 +289,8 @@ def main():
     # 2) Prepare dataset
     classes = [
         "air_conditioner","car_horn","children_playing","dog_bark","drilling",
-        "engine_idling","gun_shot","jackhammer","siren","street_music"
+        "engine_idling","gun_shot","jackhammer","siren","street_music","alarms","crowd",
+        "domestic","gunfire","police","grinding"
     ]
 
     try:
