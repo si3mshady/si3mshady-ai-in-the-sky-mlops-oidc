@@ -1,5 +1,7 @@
-# streamlit_app.py
+# streamlit_security_audio.py
 import os, io, json, time, base64, traceback
+from typing import List, Optional
+
 import streamlit as st
 import boto3
 import numpy as np
@@ -7,39 +9,45 @@ import soundfile as sf
 import librosa
 import matplotlib.pyplot as plt
 
-# --- Class list (fallback if endpoint doesn't return classes) ---
-CLASSES = [
-    "air_conditioner","car_horn","children_playing","dog_bark","drilling",
-    "engine_idling","gun_shot","jackhammer","siren","street_music",
-    "alarms","crowd","domestic","gunfire","police","grinding","forced_entry"
-]
-
-# --- Page setup ---
-st.set_page_config(page_title="🎧 UrbanSound — Endpoint Tester", page_icon="🎧", layout="centered")
-st.title("🎧 UrbanSound — SageMaker Endpoint Tester")
-st.caption("Upload a clip → send to your SageMaker endpoint → see top prediction and probabilities.")
-
-# --- Sidebar controls ---
+# ---------- Config ----------
+EXPECTED_CLASSES = ["siren","alarms","domestic","gunfire","police","forced_entry"]
 DEFAULT_ENDPOINT = os.getenv("ENDPOINT_NAME", "urbansound-audio-staging")
 DEFAULT_REGION   = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-2"))
 DEFAULT_KEY      = os.getenv("PAYLOAD_KEY", "audio")
 
+# Icons + severity coloring for a security tone
+CLASS_STYLE = {
+    "siren":        ("🚨", "critical"),
+    "alarms":       ("🔔", "high"),
+    "gunfire":      ("🔫", "critical"),
+    "forced_entry": ("🪟", "high"),
+    "police":       ("👮", "info"),
+    "domestic":     ("🏠", "medium"),
+}
+SEVERITY_BG = {"critical":"#fee2e2","high":"#fef3c7","medium":"#e0f2fe","info":"#ecfeff"}
+
+# ---------- Page ----------
+st.set_page_config(page_title="🔊 Security Audio Detector", page_icon="🔊", layout="centered")
+st.title("🔊 Security Audio Detector — SageMaker")
+st.caption("Upload an audio sample, we send it to your SageMaker endpoint, and visualize risk signals.")
+
 with st.sidebar:
     st.header("⚙️ Settings")
     endpoint = st.text_input("Endpoint name", value=DEFAULT_ENDPOINT)
-    region   = st.text_input("AWS region",    value=DEFAULT_REGION)
+    region   = st.text_input("AWS region", value=DEFAULT_REGION)
     payload_fmt = st.radio("Payload format", ["JSON (base64)", "Binary (octet-stream)"], index=0)
     json_key = st.text_input("JSON key (when JSON)", value=DEFAULT_KEY)
     send_mode = st.selectbox("Preprocess before sending",
-                             ["Raw file bytes", "Resampled mono 22.05 kHz WAV"],
-                             index=1)
-    topk = st.slider("Top-K to show", 3, min(10, len(CLASSES)), 7)
-    st.markdown("**Class legend**")
-    st.write(", ".join(CLASSES))
+                             ["Resampled mono 22.05 kHz WAV", "Raw file bytes"],
+                             index=0)
+    st.caption("Your container expects 22.05 kHz mono log-mels. Resampling recommended.")
+    st.divider()
+    st.markdown("**Expected classes**")
+    st.write(", ".join(EXPECTED_CLASSES))
 
-# --- Helpers ---
-def to_resampled_wav_bytes(raw_bytes: bytes, target_sr: int = 22050) -> bytes:
-    y, sr = librosa.load(io.BytesIO(raw_bytes), sr=None, mono=True)
+# ---------- Helpers ----------
+def _resample_to_wav(raw: bytes, target_sr: int = 22050) -> bytes:
+    y, sr = librosa.load(io.BytesIO(raw), sr=None, mono=True)
     if sr != target_sr:
         y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
     buf = io.BytesIO()
@@ -47,107 +55,123 @@ def to_resampled_wav_bytes(raw_bytes: bytes, target_sr: int = 22050) -> bytes:
     buf.seek(0)
     return buf.read()
 
-def show_mel(raw_bytes: bytes):
+def _show_mel(raw: bytes):
     try:
-        y, sr = librosa.load(io.BytesIO(raw_bytes), sr=None, mono=True)
+        y, sr = librosa.load(io.BytesIO(raw), sr=None, mono=True)
         if sr != 22050:
             y = librosa.resample(y, orig_sr=sr, target_sr=22050)
-            sr = 22050
-        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, n_fft=2048, hop_length=512, power=2.0)
+        S = librosa.feature.melspectrogram(y=y, sr=22050, n_mels=128, n_fft=2048, hop_length=512, power=2.0)
         S_db = librosa.power_to_db(S, ref=np.max)
-        fig, ax = plt.subplots()
-        ax.imshow(S_db, origin="lower", aspect="auto")
-        ax.set_title("Log-Mel Spectrogram (preview)")
-        ax.set_xlabel("Frames"); ax.set_ylabel("Mel bins")
+        fig, ax = plt.subplots(figsize=(7, 3))
+        im = ax.imshow(S_db, origin="lower", aspect="auto")
+        ax.set_title("Log-Mel Spectrogram")
+        ax.set_xlabel("Frames")
+        ax.set_ylabel("Mel bins")
         st.pyplot(fig, clear_figure=True)
     except Exception as e:
         st.info(f"Could not render spectrogram: {e}")
 
-def plot_topk(classes, probs, k):
-    idx = np.argsort(probs)[::-1][:k]
-    names = [classes[i] if i < len(classes) else str(i) for i in idx]
-    vals  = [float(probs[i]) for i in idx]
-    fig = plt.figure()
-    plt.barh(range(len(vals)), vals)
-    plt.yticks(range(len(vals)), names)
-    plt.gca().invert_yaxis()
-    plt.xlabel("Probability"); plt.xlim(0, 1)
+def _bar_plot(names: List[str], probs: List[float], top1: int):
+    h = max(2, 0.6 * len(names))  # ensure all classes fit
+    fig, ax = plt.subplots(figsize=(6.8, h))
+    y = np.arange(len(names))
+    ax.barh(y, probs)
+    ax.set_yticks(y)
+    ax.set_yticklabels(names)
+    ax.invert_yaxis()
+    ax.set_xlabel("Probability")
+    ax.set_xlim(0, 1)
+    for i, p in enumerate(probs):
+        ax.text(p + 0.01, i, f"{p:.2f}", va="center")
     st.pyplot(fig, clear_figure=True)
 
-# --- UI: upload & preview ---
-file = st.file_uploader("Upload audio", type=["wav","mp3","ogg","flac","m4a","aiff","aif"])
+def _badge(label: str, prob: float):
+    icon, sev = CLASS_STYLE.get(label, ("🔊", "info"))
+    bg = SEVERITY_BG.get(sev, "#ecfeff")
+    st.markdown(
+        f"""
+        <div style="background:{bg};padding:14px 16px;border-radius:14px;
+                    border:1px solid rgba(0,0,0,0.06);">
+          <div style="font-size:22px;font-weight:700;">
+            {icon} Top-1: <span style="text-transform:none">{label}</span> ({prob:.1%})
+          </div>
+          <div style="opacity:0.8;margin-top:4px">Severity: <b>{sev.title()}</b></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ---------- App body ----------
+file = st.file_uploader("Upload audio (wav/mp3/ogg/flac/m4a/aiff)", type=["wav","mp3","ogg","flac","m4a","aiff"])
 if file:
     raw = file.read()
     st.audio(raw)
-    with st.expander("Preview spectrogram", expanded=False):
-        show_mel(raw)
+    with st.expander("Preview features", expanded=False):
+        _show_mel(raw)
 else:
     st.info("Waiting for an audio file…")
 
-# --- Predict ---
-if st.button("Predict 🚀", type="primary", disabled=(file is None)):
+if st.button("Analyze 🔍", type="primary", disabled=not file):
     try:
-        body_bytes = raw if send_mode == "Raw file bytes" else to_resampled_wav_bytes(raw, 22050)
+        payload_bytes = _resample_to_wav(raw) if send_mode.startswith("Resampled") else raw
+        content_type  = "application/json" if payload_fmt.startswith("JSON") else "application/octet-stream"
+        body = (json.dumps({json_key: base64.b64encode(payload_bytes).decode("ascii")}).encode("utf-8")
+                if content_type == "application/json" else payload_bytes)
+
         rt = boto3.client("sagemaker-runtime", region_name=region or None)
-
-        if payload_fmt.startswith("JSON"):
-            payload = json.dumps({json_key: base64.b64encode(body_bytes).decode("ascii")}).encode("utf-8")
-            content_type = "application/json"
-        else:
-            payload = body_bytes
-            content_type = "application/octet-stream"
-
         with st.spinner("Calling endpoint…"):
             t0 = time.time()
-            resp = rt.invoke_endpoint(EndpointName=endpoint, ContentType=content_type, Body=payload)
+            resp = rt.invoke_endpoint(EndpointName=endpoint, ContentType=content_type, Body=body)
             latency_ms = int((time.time() - t0) * 1000)
-            body = resp["Body"].read()
+            payload = resp["Body"].read()
+
+        # Parse response
+        parsed: Optional[dict] = None
+        try:
+            parsed = json.loads(payload)
+        except Exception:
+            parsed = None
 
         st.caption(f"Latency: **{latency_ms} ms** • ContentType sent: `{content_type}`")
 
-        parsed = None
-        try:
-            parsed = json.loads(body)
-        except Exception:
-            pass
+        if not isinstance(parsed, dict):
+            st.error("Endpoint did not return JSON. See raw payload below.")
+            st.code(payload[:1000])
+        else:
+            classes = parsed.get("classes") or parsed.get("labels") or EXPECTED_CLASSES
+            probs   = parsed.get("probs")    or parsed.get("scores") or parsed.get("probabilities")
 
-        if isinstance(parsed, dict):
-            # Prefer server-provided classes; fallback to our CLASSES
-            srv_classes = parsed.get("classes") or parsed.get("labels") or parsed.get("class_names")
-            classes = srv_classes if (isinstance(srv_classes, list) and len(srv_classes) > 0) else CLASSES
-            probs = parsed.get("probs") or parsed.get("scores") or parsed.get("probabilities")
-            label = parsed.get("label") or parsed.get("prediction")
+            # Safety: coerce numeric list
+            if probs is not None:
+                probs = [float(p) for p in probs]
 
-            if probs is not None and isinstance(probs, (list, tuple)) and len(probs) > 0:
-                probs = np.asarray(probs, dtype=float)
-                top = int(np.argmax(probs))
-                top_label = classes[top] if top < len(classes) else str(top)
-                top_prob  = float(probs[top])
-                st.success(f"Top-1: **{top_label}** ({top_prob:.1%})")
+            if probs and classes and len(probs) == len(classes):
+                arr = np.array(probs)
+                top = int(arr.argmax())
+                _badge(classes[top], arr[top])
+
                 with st.expander("Top probabilities", expanded=True):
-                    plot_topk(classes, probs, k=min(topk, len(probs)))
-                with st.expander("Raw JSON response", expanded=False):
+                    _bar_plot(classes, list(arr), top)
+
+                # Nudge if the model’s class list differs from expected security set
+                if set(c.lower() for c in classes) != set(EXPECTED_CLASSES):
+                    st.info("The model’s class list differs from the 6 security classes shown in the sidebar. "
+                            "If this is unexpected, retrain with the curated classes or confirm classes.json.")
+                with st.expander("Raw JSON", expanded=False):
                     st.json(parsed)
-            elif label is not None:
-                st.success(f"Prediction: **{label}**")
-                with st.expander("Raw JSON response", expanded=False):
+
+            elif "label" in parsed:
+                lbl = str(parsed["label"])
+                _badge(lbl, float(parsed.get("confidence", 0.0)))
+                with st.expander("Raw JSON", expanded=False):
                     st.json(parsed)
             else:
-                st.subheader("JSON response")
+                st.warning("Could not find probabilities in the response. Showing raw JSON.")
                 st.json(parsed)
-        else:
-            # Not JSON → show text/bytes
-            try:
-                txt = body.decode("utf-8", errors="ignore")
-                st.subheader("Raw text response")
-                st.code(txt)
-            except Exception:
-                st.subheader("Raw bytes response")
-                st.write(body)
 
     except Exception as e:
         st.error(f"Invoke failed: {e}")
         st.code(traceback.format_exc())
 
-st.caption("Tip: set ENDPOINT_NAME, AWS_REGION, PAYLOAD_KEY env vars to prefill settings.")
+st.caption("Tip: set ENDPOINT_NAME, AWS_REGION, PAYLOAD_KEY environment variables to prefill settings.")
 
