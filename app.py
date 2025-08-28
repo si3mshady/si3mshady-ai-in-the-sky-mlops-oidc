@@ -1,7 +1,6 @@
-# streamlit_security_audio.py
+# streamlit_security_audio.py 
 import os, io, json, time, base64, traceback
 from typing import List, Optional
-
 
 import streamlit as st
 import boto3
@@ -11,26 +10,22 @@ import librosa
 import matplotlib.pyplot as plt
 
 # ---------- Config ----------
-EXPECTED_CLASSES = ["siren","alarms","domestic","gunfire","police","forced_entry"]
+EXPECTED_CLASSES = ["gunfire", "glass_shatter"]  # ⬅️ updated to your two classes
 DEFAULT_ENDPOINT = os.getenv("ENDPOINT_NAME", "urbansound-audio-staging")
 DEFAULT_REGION   = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-2"))
 DEFAULT_KEY      = os.getenv("PAYLOAD_KEY", "audio")
 
 # Icons + severity coloring for a security tone
 CLASS_STYLE = {
-    "siren":        ("🚨", "critical"),
-    "alarms":       ("🔔", "high"),
-    "gunfire":      ("🔫", "critical"),
-    "forced_entry": ("🪟", "high"),
-    "police":       ("👮", "info"),
-    "domestic":     ("🏠", "medium"),
+    "gunfire":       ("🔫", "critical"),
+    "glass_shatter": ("🪟", "high"),
 }
 SEVERITY_BG = {"critical":"#fee2e2","high":"#fef3c7","medium":"#e0f2fe","info":"#ecfeff"}
 
 # ---------- Page ----------
 st.set_page_config(page_title="🔊 Security Audio Detector", page_icon="🔊", layout="centered")
 st.title("🔊 Security Audio Detector — SageMaker")
-st.caption("Upload an audio sample, we send it to your SageMaker endpoint, and visualize risk signals.")
+st.caption("Upload an audio sample, we send it to your SageMaker endpoint, and visualize risk signals (gunfire vs glass_shatter).")
 
 with st.sidebar:
     st.header("⚙️ Settings")
@@ -154,9 +149,9 @@ if st.button("Analyze 🔍", type="primary", disabled=not file):
                 with st.expander("Top probabilities", expanded=True):
                     _bar_plot(classes, list(arr), top)
 
-                # Nudge if the model’s class list differs from expected security set
+                # Nudge if the model’s class list differs from expected set
                 if set(c.lower() for c in classes) != set(EXPECTED_CLASSES):
-                    st.info("The model’s class list differs from the 6 security classes shown in the sidebar. "
+                    st.info(f"The model’s class list differs from the {len(EXPECTED_CLASSES)} security classes shown in the sidebar. "
                             "If this is unexpected, retrain with the curated classes or confirm classes.json.")
                 with st.expander("Raw JSON", expanded=False):
                     st.json(parsed)
@@ -175,4 +170,3 @@ if st.button("Analyze 🔍", type="primary", disabled=not file):
         st.code(traceback.format_exc())
 
 st.caption("Tip: set ENDPOINT_NAME, AWS_REGION, PAYLOAD_KEY environment variables to prefill settings.")
-
