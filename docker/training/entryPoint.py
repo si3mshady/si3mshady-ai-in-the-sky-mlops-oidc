@@ -345,8 +345,7 @@ def main():
         raise
     
     classes = [
-        "siren", "alarms",
-        "domestic", "gunfire", "police", "forced_entry"
+        "gunfire", "glass_shatter"
     ]
     
     train_ds = CoverageWindowDataset(
