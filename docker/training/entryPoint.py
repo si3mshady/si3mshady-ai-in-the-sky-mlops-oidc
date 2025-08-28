@@ -33,8 +33,8 @@ BUCKET     = os.environ.get("S3_TRAIN_BUCKET", "urbansound-mlops-56423506")
 PREFIX     = os.environ.get("S3_TRAIN_PREFIX", "training/").rstrip("/") + "/"
 LOCAL_DIR  = Path("/opt/ml/input/data/training")
 MODEL_DIR  = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-EPOCHS     = int(os.environ.get("EPOCHS", "5"))
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "32"))
+EPOCHS     = int(os.environ.get("EPOCHS", "10"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "5"))
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))   # set 0 for maximal tracebacks
 MAX_BAD_BATCHES_TO_LOG = int(os.environ.get("MAX_BAD_BATCHES_TO_LOG", "50"))
 MAX_BAD_FILES_BEFORE_WARN = int(os.environ.get("MAX_BAD_FILES_BEFORE_WARN", "50"))
@@ -387,7 +387,9 @@ def main():
     # class-imbalance handling
     class_weights = compute_class_weights_from_windows(train_ds, len(classes)).to(device)
     loss_fn = nn.CrossEntropyLoss(weight=class_weights)
-    optim  = torch.optim.Adam(model.parameters(), lr=1e-3)
+    # optim  = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optim = torch.optim.Adam(model.parameters(), lr=1e-4)  # 10x lower
+
     # 5) Train loop (robust + chatty)
     best_acc, best_path = 0.0, MODEL_DIR / "model.pt"
     for epoch in range(1, EPOCHS + 1):
