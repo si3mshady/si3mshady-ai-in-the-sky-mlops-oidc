@@ -10,7 +10,7 @@ import librosa
 import matplotlib.pyplot as plt
 
 # ---------- Config ----------
-EXPECTED_CLASSES = ["gunfire", "glass_shatter"]  # ⬅️ updated to your two classes
+EXPECTED_CLASSES = ["tires", "glass_shatter"]  # ⬅️ updated to your two classes
 DEFAULT_ENDPOINT = os.getenv("ENDPOINT_NAME", "urbansound-audio-staging")
 DEFAULT_REGION   = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-2"))
 DEFAULT_KEY      = os.getenv("PAYLOAD_KEY", "audio")
