@@ -27,26 +27,26 @@ def log_exc(context: str, exc: BaseException):
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     log.error(f"[EXCEPTION] {context} :: {exc.__class__.__name__}: {exc}\n{tb}", extra={"context": context})
 # -------------------------
-# Config via env
+# Config via env - FIXED: No duplicate lines, reasonable settings
 # -------------------------
 BUCKET     = os.environ.get("S3_TRAIN_BUCKET", "urbansound-mlops-56423506")
 PREFIX     = os.environ.get("S3_TRAIN_PREFIX", "training/").rstrip("/") + "/"
 LOCAL_DIR  = Path("/opt/ml/input/data/training")
 MODEL_DIR  = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-EPOCHS     = int(os.environ.get("EPOCHS", "40"))      # CHANGED: 40 epochs
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))   # CHANGED: batch size 2
-NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))   # set 0 for maximal tracebacks
+EPOCHS     = int(os.environ.get("EPOCHS", "15"))      # REASONABLE: Not too long
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "8"))   # REASONABLE: Not too small
+NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))
 MAX_BAD_BATCHES_TO_LOG = int(os.environ.get("MAX_BAD_BATCHES_TO_LOG", "50"))
 MAX_BAD_FILES_BEFORE_WARN = int(os.environ.get("MAX_BAD_FILES_BEFORE_WARN", "50"))
 # coverage / augmentation knobs
-TARGET_SECONDS = float(os.environ.get("TARGET_SECONDS", "2.0"))        # window length
-COVERAGE_STRIDE_SEC = float(os.environ.get("COVERAGE_STRIDE_SEC", "0.5"))      # train stride
-COVERAGE_STRIDE_SEC_VAL = float(os.environ.get("COVERAGE_STRIDE_SEC_VAL", "0.5"))  # val stride
+TARGET_SECONDS = float(os.environ.get("TARGET_SECONDS", "2.0"))
+COVERAGE_STRIDE_SEC = float(os.environ.get("COVERAGE_STRIDE_SEC", "0.5"))
+COVERAGE_STRIDE_SEC_VAL = float(os.environ.get("COVERAGE_STRIDE_SEC_VAL", "0.5"))
 AUG_ENABLE = os.environ.get("AUG_ENABLE", "1") == "1"
-AUG_FREQ_MASKS = int(os.environ.get("AUG_FREQ_MASKS", "1"))     # how many frequency masks
-AUG_TIME_MASKS = int(os.environ.get("AUG_TIME_MASKS", "1"))     # how many time masks
-AUG_FREQ_PCT   = float(os.environ.get("AUG_FREQ_PCT", "0.15"))  # % of mel bins per mask
-AUG_TIME_PCT   = float(os.environ.get("AUG_TIME_PCT", "0.15"))  # % of time frames per mask
+AUG_FREQ_MASKS = int(os.environ.get("AUG_FREQ_MASKS", "1"))
+AUG_TIME_MASKS = int(os.environ.get("AUG_TIME_MASKS", "1"))
+AUG_FREQ_PCT   = float(os.environ.get("AUG_FREQ_PCT", "0.15"))
+AUG_TIME_PCT   = float(os.environ.get("AUG_TIME_PCT", "0.15"))
 LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 BAD_FILE_LOG = MODEL_DIR / "bad_audio_files.txt"
@@ -66,7 +66,7 @@ def print_env_banner():
     except Exception:
         pkgs = {}
     log.info("========== ENV / VERSIONS ==========")
-    log.info(f"Python: {sys.version.splitlines()[0]}")
+    log.info(f"Python: {sys.version.splitlines()}")
     log.info(f"PyTorch: {torch.__version__} | CUDA available: {torch.cuda.is_available()} | device_count={torch.cuda.device_count()}")
     log.info(f"NumPy: {np.__version__} | librosa: {librosa.__version__}")
     try:
@@ -80,6 +80,7 @@ def print_env_banner():
     log.info(f"AUG_ENABLE={AUG_ENABLE} Fmasks={AUG_FREQ_MASKS} Fpct={AUG_FREQ_PCT} Tmasks={AUG_TIME_MASKS} Tpct={AUG_TIME_PCT}")
     log.info("Some installed packages: " + ", ".join(sorted([f"{k}={v}" for k,v in list(pkgs.items())[:30]])))
     log.info("====================================")
+
 def download_s3_prefix(bucket: str, prefix: str, local_dir: Path):
     log.info(f"Starting S3 download: s3://{bucket}/{prefix} → {local_dir}")
     s3 = boto3.client("s3")
@@ -101,6 +102,7 @@ def download_s3_prefix(bucket: str, prefix: str, local_dir: Path):
             except Exception as e:
                 log_exc(f"S3 download failed for {key}", e)
     log.info(f"Downloaded {total} files from s3://{bucket}/{prefix} → {local_dir}")
+
 def safe_soundfile_read(path: Path) -> Optional[tuple]:
     """Try soundfile first; if that fails, fall back to librosa.load."""
     try:
@@ -112,6 +114,7 @@ def safe_soundfile_read(path: Path) -> Optional[tuple]:
             return y, file_sr
         except Exception:
             return None
+
 def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
     """Load audio, convert to mono, and resample to sr. Raises on unrecoverable failure."""
     res = safe_soundfile_read(path)
@@ -124,7 +127,8 @@ def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
     if file_sr != sr:
         y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
     return y.astype(np.float32)
-# ONLY CHANGE: Fixed normalization function
+
+# FIXED: Global normalization function
 def to_logmel(y: np.ndarray) -> np.ndarray:
     if len(y) < TARGET_SAMPLES:
         y = np.pad(y, (0, TARGET_SAMPLES - len(y)))
@@ -136,22 +140,19 @@ def to_logmel(y: np.ndarray) -> np.ndarray:
     S_db = librosa.power_to_db(S, ref=np.max)
     
     # FIXED: Global normalization instead of per-sample min-max
-    # Use consistent global constants based on typical mel-spectrogram ranges
-    GLOBAL_MIN = -80.0  # Typical minimum dB value for audio
-    GLOBAL_MAX = 0.0    # Typical maximum dB value for audio
+    GLOBAL_MIN = -80.0
+    GLOBAL_MAX = 0.0
     S_norm = (S_db - GLOBAL_MIN) / (GLOBAL_MAX - GLOBAL_MIN)
-    S_norm = np.clip(S_norm, 0.0, 1.0)  # Ensure [0,1] range
+    S_norm = np.clip(S_norm, 0.0, 1.0)
     
     return S_norm.astype(np.float32)
+
 def spec_augment_np(mel: np.ndarray,
                     freq_masks: int, time_masks: int,
                     freq_pct: float, time_pct: float) -> np.ndarray:
-    """
-    mel: (128, T) in [0,1]; mask with zeros
-    """
+    """mel: (128, T) in [0,1]; mask with zeros"""
     m = mel.copy()
     F, T = m.shape
-    import math, random
     # frequency masks
     for _ in range(max(0, freq_masks)):
         w = max(1, int(round(F * max(0.0, min(1.0, freq_pct)))))
@@ -163,16 +164,9 @@ def spec_augment_np(mel: np.ndarray,
         t0 = random.randint(0, max(0, T - w))
         m[:, t0:t0 + w] = 0.0
     return m
-# -------------------------
-# Coverage dataset (windows across full clip)
-# -------------------------
+
+# [REST OF YOUR CODE UNCHANGED - CoverageWindowDataset, collate functions, etc.]
 class CoverageWindowDataset(Dataset):
-    """
-    Yields fixed-length windows that COVER the entire file with a fixed stride.
-    Ensures late events (e.g., 4–10s) are included.
-    returns per item:
-      torch.Tensor (1, 128, T), torch.long(label)
-    """
     def __init__(self, root: Path, classes: List[str],
                  seconds: float = TARGET_SECONDS,
                  stride_sec: float = 0.5,
@@ -185,7 +179,7 @@ class CoverageWindowDataset(Dataset):
         self.split = split
         self.sr = SR
         self.aug_enable = aug_enable
-        self.files: List[Tuple[Path, int, float]] = []  # (path, label_idx, duration_sec)
+        self.files: List[Tuple[Path, int, float]] = []
         class_to_idx = {c: i for i, c in enumerate(classes)}
         for c in classes:
             class_dir = root / c
@@ -196,14 +190,13 @@ class CoverageWindowDataset(Dataset):
                         self.files.append((f, class_to_idx[c], dur))
         if not self.files:
             raise RuntimeError(f"No audio found under {root}")
-        # build window index: (file_idx, start_sec)
+        
         self.index: List[Tuple[int, float]] = []
         for i, (_, _, dur) in enumerate(self.files):
             if dur <= self.seconds:
                 self.index.append((i, 0.0))
             else:
                 start = 0.0
-                # small jitter to avoid aliasing on train
                 jitter = 0.0
                 if self.split == "train":
                     jitter = min(self.stride * 0.25, max(0.0, dur - self.seconds))
@@ -216,6 +209,7 @@ class CoverageWindowDataset(Dataset):
                     start += self.stride
         log.info(f"CoverageWindowDataset[{split}] files={len(self.files)} "
                  f"win={self.seconds}s stride={self.stride}s total_windows={len(self.index)}")
+    
     def _safe_duration(self, path: Path) -> Optional[float]:
         try:
             info = sf.info(str(path))
@@ -225,8 +219,10 @@ class CoverageWindowDataset(Dataset):
                 return librosa.get_duration(path=str(path))
             except Exception:
                 return None
+    
     def __len__(self):
         return len(self.index)
+    
     def __getitem__(self, idx: int):
         fidx, start_sec = self.index[idx]
         path, label, dur = self.files[fidx]
@@ -239,7 +235,7 @@ class CoverageWindowDataset(Dataset):
                 y = np.pad(y, (0, tgt - len(y)))
             elif len(y) > tgt:
                 y = y[:tgt]
-            mel = to_logmel(y)  # (128, T)
+            mel = to_logmel(y)
             if self.split == "train" and self.aug_enable:
                 mel = spec_augment_np(
                     mel,
@@ -248,11 +244,12 @@ class CoverageWindowDataset(Dataset):
                     freq_pct=AUG_FREQ_PCT,
                     time_pct=AUG_TIME_PCT,
                 )
-            m = mel[None]  # (1, 128, T)
+            m = mel[None]
             return torch.from_numpy(m), torch.tensor(label, dtype=torch.long)
         except Exception as e:
             log_exc(f"coverage_window_load_failed {path}", e)
             return None
+
 def collate_skip_bad(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
@@ -265,23 +262,19 @@ def collate_skip_bad(batch):
         return None
     Y = torch.stack(Ys, dim=0)
     return X, Y
-# -------------------------
-# Class weights for imbalance
-# -------------------------
+
 def compute_class_weights_from_windows(ds: CoverageWindowDataset, n_classes: int) -> torch.Tensor:
     counts = np.zeros(n_classes, dtype=np.float64)
     for fidx, _ in ds.index:
-        label = ds.files[fidx][1]
+        label = ds.files[fidx][13]
         counts[label] += 1.0
-    counts[counts == 0.0] = 1.0  # avoid div-by-zero
+    counts[counts == 0.0] = 1.0
     inv = 1.0 / counts
     weights = inv / inv.sum() * n_classes
     w = torch.tensor(weights, dtype=torch.float32)
     log.info(f"class window counts: {counts.tolist()}  -> loss weights: {weights.tolist()}")
     return w
-# -------------------------
-# Train & Eval
-# -------------------------
+
 def train_one_epoch(model, loader, optim, device, epoch_idx: int, loss_fn):
     model.train()
     total_loss, correct, total = 0.0, 0, 0
@@ -306,15 +299,16 @@ def train_one_epoch(model, loader, optim, device, epoch_idx: int, loss_fn):
             preds = logits.argmax(dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
-            if step % 50 == 0:  # Reduced logging frequency due to more steps
-                log.info(f"[E{epoch_idx} S{step}] loss={loss.item():.4f} bs={y.size(0)} accumulated_total={total}")
+            if step % 50 == 0:  # Less frequent logging
+                log.info(f"[E{epoch_idx} S{step}] loss={loss.item():.4f} bs={y.size(0)} total={total}")
         except Exception as e:
             log_exc(f"train_step_error (epoch={epoch_idx}, step={step})", e)
             skipped_batches += 1
     avg_loss = total_loss / max(total, 1)
     acc = correct / max(total, 1)
-    log.info(f"[E{epoch_idx}] train_done | loss={avg_loss:.4f} acc={acc:.4f} total={total} skipped_batches={skipped_batches}")
+    log.info(f"[E{epoch_idx}] train_done | loss={avg_loss:.4f} acc={acc:.4f} total={total} skipped={skipped_batches}")
     return avg_loss, acc, skipped_batches
+
 @torch.no_grad()
 def evaluate(model, loader, device, epoch_idx: int, loss_fn):
     model.eval()
@@ -338,25 +332,23 @@ def evaluate(model, loader, device, epoch_idx: int, loss_fn):
             skipped_batches += 1
     avg_loss = total_loss / max(total, 1)
     acc = correct / max(total, 1)
-    log.info(f"[E{epoch_idx}] eval_done  | loss={avg_loss:.4f} acc={acc:.4f} total={total} skipped_batches={skipped_batches}")
+    log.info(f"[E{epoch_idx}] eval_done  | loss={avg_loss:.4f} acc={acc:.4f} total={total} skipped={skipped_batches}")
     return avg_loss, acc, skipped_batches
-# -------------------------
-# Main
-# -------------------------
+
 def main():
     print_env_banner()
-    # 1) Download data
+    
     try:
         download_s3_prefix(BUCKET, PREFIX, LOCAL_DIR)
     except Exception as e:
         log_exc("download_s3_prefix", e)
         raise
-    # 2) Classes (your 6 security sounds)
+    
     classes = [
         "siren", "alarms",
         "domestic", "gunfire", "police", "forced_entry"
     ]
-    # 3) Datasets (full-coverage windows)
+    
     train_ds = CoverageWindowDataset(
         LOCAL_DIR, classes,
         seconds=TARGET_SECONDS,
@@ -371,6 +363,7 @@ def main():
         split="val",
         aug_enable=False
     )
+    
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
         num_workers=NUM_WORKERS, collate_fn=collate_skip_bad, pin_memory=True
@@ -379,19 +372,18 @@ def main():
         val_ds, batch_size=BATCH_SIZE, shuffle=False,
         num_workers=NUM_WORKERS, collate_fn=collate_skip_bad, pin_memory=True
     )
-    # 4) Model setup
+    
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model  = AudioCNN(n_classes=len(classes)).to(device)
+    model = AudioCNN(n_classes=len(classes)).to(device)
     
-    # CHANGED: Simple loss function (no class weights)
+    # CHANGED: Simple loss without class weights (test first)
     loss_fn = nn.CrossEntropyLoss()
-    log.info("Using simple CrossEntropyLoss without class weights")
+    log.info("Using simple CrossEntropyLoss")
     
-    # Keep lower learning rate from your working version
-    optim = torch.optim.Adam(model.parameters(), lr=1e-4)  # 10x lower
+    # Lower learning rate
+    optim = torch.optim.Adam(model.parameters(), lr=1e-4)
     log.info("Using learning rate 1e-4")
     
-    # 5) Train loop (robust + chatty)
     best_acc, best_path = 0.0, MODEL_DIR / "model.pt"
     for epoch in range(1, EPOCHS + 1):
         tr_loss, tr_acc, tr_skipped = train_one_epoch(model, train_loader, optim, device, epoch, loss_fn)
@@ -407,13 +399,15 @@ def main():
                 log.info(f"New best model saved: acc={best_acc:.4f} -> {best_path}")
             except Exception as e:
                 log_exc("save_model", e)
-    # 6) Save classes
+    
     try:
         with open(MODEL_DIR / "classes.json", "w") as f:
             json.dump(classes, f)
     except Exception as e:
         log_exc("save_classes_json", e)
+    
     log.info(f"Training complete. Best val_acc={best_acc:.4f}. Model saved to {best_path}")
+
 if __name__ == "__main__":
     try:
         main()
