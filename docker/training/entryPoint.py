@@ -44,6 +44,16 @@ NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))   # set 0 for maximal trac
 MAX_BAD_BATCHES_TO_LOG = int(os.environ.get("MAX_BAD_BATCHES_TO_LOG", "50"))
 MAX_BAD_FILES_BEFORE_WARN = int(os.environ.get("MAX_BAD_FILES_BEFORE_WARN", "50"))
 
+# coverage / augmentation knobs
+TARGET_SECONDS = float(os.environ.get("TARGET_SECONDS", "2.0"))        # window length
+COVERAGE_STRIDE_SEC = float(os.environ.get("COVERAGE_STRIDE_SEC", "0.5"))      # train stride
+COVERAGE_STRIDE_SEC_VAL = float(os.environ.get("COVERAGE_STRIDE_SEC_VAL", "0.5"))  # val stride
+AUG_ENABLE = os.environ.get("AUG_ENABLE", "1") == "1"
+AUG_FREQ_MASKS = int(os.environ.get("AUG_FREQ_MASKS", "1"))     # how many frequency masks
+AUG_TIME_MASKS = int(os.environ.get("AUG_TIME_MASKS", "1"))     # how many time masks
+AUG_FREQ_PCT   = float(os.environ.get("AUG_FREQ_PCT", "0.15"))  # % of mel bins per mask
+AUG_TIME_PCT   = float(os.environ.get("AUG_TIME_PCT", "0.15"))  # % of time frames per mask
+
 LOCAL_DIR.mkdir(parents=True, exist_ok=True)
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 BAD_FILE_LOG = MODEL_DIR / "bad_audio_files.txt"
@@ -53,7 +63,6 @@ BAD_FILE_LOG = MODEL_DIR / "bad_audio_files.txt"
 # -------------------------
 AUDIO_EXTS      = (".wav", ".mp3", ".flac", ".aif", ".aiff", ".m4a", ".ogg")
 SR              = 22050
-TARGET_SECONDS  = float(os.environ.get("TARGET_SECONDS", "2.0"))
 TARGET_SAMPLES  = int(SR * TARGET_SECONDS)
 
 # -------------------------
@@ -76,6 +85,8 @@ def print_env_banner():
         log.info("soundfile: (unknown)")
     log.info(f"BUCKET={BUCKET}  PREFIX={PREFIX}  LOCAL_DIR={LOCAL_DIR}  MODEL_DIR={MODEL_DIR}")
     log.info(f"EPOCHS={EPOCHS}  BATCH_SIZE={BATCH_SIZE}  NUM_WORKERS={NUM_WORKERS}  TARGET_SECONDS={TARGET_SECONDS}")
+    log.info(f"COVERAGE_STRIDE_SEC={COVERAGE_STRIDE_SEC}  COVERAGE_STRIDE_SEC_VAL={COVERAGE_STRIDE_SEC_VAL}")
+    log.info(f"AUG_ENABLE={AUG_ENABLE} Fmasks={AUG_FREQ_MASKS} Fpct={AUG_FREQ_PCT} Tmasks={AUG_TIME_MASKS} Tpct={AUG_TIME_PCT}")
     log.info("Some installed packages: " + ", ".join(sorted([f"{k}={v}" for k,v in list(pkgs.items())[:30]])))
     log.info("====================================")
 
@@ -106,13 +117,11 @@ def safe_soundfile_read(path: Path) -> Optional[tuple]:
     try:
         y, file_sr = sf.read(str(path), always_2d=False)
         return y, file_sr
-    except Exception as e_sf:
-        # fallback to librosa (will use audioread/ffmpeg if available)
+    except Exception:
         try:
             y, file_sr = librosa.load(str(path), sr=None, mono=False)
             return y, file_sr
-        except Exception as e_lib:
-            # Return None to signal failure; caller will log
+        except Exception:
             return None
 
 def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
@@ -125,7 +134,6 @@ def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
     if y.ndim > 1:
         y = y.mean(axis=0)
     if file_sr != sr:
-        # librosa 0.10 API with keywords
         y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
     return y.astype(np.float32)
 
@@ -138,75 +146,165 @@ def to_logmel(y: np.ndarray) -> np.ndarray:
         y=y, sr=SR, n_mels=128, n_fft=2048, hop_length=512, power=2.0
     )
     S_db = librosa.power_to_db(S, ref=np.max)
+    # Min-max to [0,1] — matches your existing pipeline
     S_norm = (S_db - S_db.min()) / (S_db.max() - S_db.min() + 1e-8)
     return S_norm.astype(np.float32)
 
+def spec_augment_np(mel: np.ndarray,
+                    freq_masks: int, time_masks: int,
+                    freq_pct: float, time_pct: float) -> np.ndarray:
+    """
+    mel: (128, T) in [0,1]; mask with zeros
+    """
+    m = mel.copy()
+    F, T = m.shape
+    import math, random
+    # frequency masks
+    for _ in range(max(0, freq_masks)):
+        w = max(1, int(round(F * max(0.0, min(1.0, freq_pct)))))
+        f0 = random.randint(0, max(0, F - w))
+        m[f0:f0 + w, :] = 0.0
+    # time masks
+    for _ in range(max(0, time_masks)):
+        w = max(1, int(round(T * max(0.0, min(1.0, time_pct)))))
+        t0 = random.randint(0, max(0, T - w))
+        m[:, t0:t0 + w] = 0.0
+    return m
+
 # -------------------------
-# Dataset with robust error handling
+# Coverage dataset (windows across full clip)
 # -------------------------
-class UrbanSoundDataset(Dataset):
-    def __init__(self, root: Path, classes: List[str]):
-        self.samples: List[Tuple[Path, int]] = []
-        self.bad_files: List[str] = []
+class CoverageWindowDataset(Dataset):
+    """
+    Yields fixed-length windows that COVER the entire file with a fixed stride.
+    Ensures late events (e.g., 4–10s) are included.
+
+    returns per item:
+      torch.Tensor (1, 128, T), torch.long(label)
+    """
+    def __init__(self, root: Path, classes: List[str],
+                 seconds: float = TARGET_SECONDS,
+                 stride_sec: float = 0.5,
+                 split: str = "train",
+                 aug_enable: bool = True):
+        assert split in ("train", "val")
+        self.root = root
+        self.seconds = float(seconds)
+        self.stride = float(stride_sec)
+        self.split = split
+        self.sr = SR
+        self.aug_enable = aug_enable
+
+        self.files: List[Tuple[Path, int, float]] = []  # (path, label_idx, duration_sec)
         class_to_idx = {c: i for i, c in enumerate(classes)}
 
         for c in classes:
             class_dir = root / c
             for ext in AUDIO_EXTS:
                 for f in class_dir.rglob(f"*{ext}"):
-                    self.samples.append((f, class_to_idx[c]))
+                    dur = self._safe_duration(f)
+                    if dur and dur > 0:
+                        self.files.append((f, class_to_idx[c], dur))
 
-        if not self.samples:
-            raise RuntimeError(f"No audio found under {root}. Checked classes={classes}")
+        if not self.files:
+            raise RuntimeError(f"No audio found under {root}")
 
-        random.shuffle(self.samples)
-        log.info(f"Dataset initialized: {len(self.samples)} files across {len(classes)} classes.")
-        counts = {c: 0 for c in classes}
-        for p, idx in self.samples:
-            for c, i in class_to_idx.items():
-                if i == idx:
-                    counts[c] += 1
-                    break
-        log.info(f"Per-class counts: {counts}")
+        # build window index: (file_idx, start_sec)
+        self.index: List[Tuple[int, float]] = []
+        for i, (_, _, dur) in enumerate(self.files):
+            if dur <= self.seconds:
+                self.index.append((i, 0.0))
+            else:
+                start = 0.0
+                # small jitter to avoid aliasing on train
+                jitter = 0.0
+                if self.split == "train":
+                    jitter = min(self.stride * 0.25, max(0.0, dur - self.seconds))
+                while start <= (dur - self.seconds + 1e-6):
+                    s = start
+                    if self.split == "train" and jitter > 0.0:
+                        s = max(0.0, min(dur - self.seconds,
+                                         s + random.uniform(-jitter, jitter)))
+                    self.index.append((i, s))
+                    start += self.stride
+
+        log.info(f"CoverageWindowDataset[{split}] files={len(self.files)} "
+                 f"win={self.seconds}s stride={self.stride}s total_windows={len(self.index)}")
+
+    def _safe_duration(self, path: Path) -> Optional[float]:
+        try:
+            info = sf.info(str(path))
+            return float(info.frames) / float(info.samplerate)
+        except Exception:
+            try:
+                return librosa.get_duration(path=str(path))
+            except Exception:
+                return None
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.index)
 
     def __getitem__(self, idx: int):
-        path, label = self.samples[idx]
+        fidx, start_sec = self.index[idx]
+        path, label, dur = self.files[fidx]
         try:
-            y = load_audio_mono(path)
-            m = to_logmel(y)[None]  # (1, 128, T)
+            y, sr = librosa.load(str(path), sr=self.sr, mono=True,
+                                 offset=float(max(0.0, start_sec)),
+                                 duration=float(self.seconds))
+            tgt = int(self.sr * self.seconds)
+            if len(y) < tgt:
+                y = np.pad(y, (0, tgt - len(y)))
+            elif len(y) > tgt:
+                y = y[:tgt]
+
+            mel = to_logmel(y)  # (128, T)
+            if self.split == "train" and self.aug_enable:
+                mel = spec_augment_np(
+                    mel,
+                    freq_masks=AUG_FREQ_MASKS,
+                    time_masks=AUG_TIME_MASKS,
+                    freq_pct=AUG_FREQ_PCT,
+                    time_pct=AUG_TIME_PCT,
+                )
+            m = mel[None]  # (1, 128, T)
             return torch.from_numpy(m), torch.tensor(label, dtype=torch.long)
         except Exception as e:
-            # Log once per bad file and append to list
-            msg = f"[BAD_AUDIO] {path} :: {type(e).__name__}: {e}"
-            log.warning(msg)
-            self.bad_files.append(str(path))
-            # Return sentinel; collate_fn will drop it
+            log_exc(f"coverage_window_load_failed {path}", e)
             return None
 
 def collate_skip_bad(batch):
     batch = [b for b in batch if b is not None]
     if not batch:
-        # None batch (all bad) -> signal caller to skip
         return None
     Xs, Ys = zip(*batch)
     try:
         X = torch.stack(Xs, dim=0)
     except Exception as e:
-        # Shape mismatch shouldn't happen given fixed pipeline, but log and drop
         log_exc("collate_stack_failed", e)
         return None
     Y = torch.stack(Ys, dim=0)
     return X, Y
 
 # -------------------------
-# Train & Eval with try/except per-batch
+# Class weights for imbalance
 # -------------------------
-def train_one_epoch(model, loader, optim, device, epoch_idx: int):
+def compute_class_weights_from_windows(ds: CoverageWindowDataset, n_classes: int) -> torch.Tensor:
+    counts = np.zeros(n_classes, dtype=np.float64)
+    for fidx, _ in ds.index:
+        label = ds.files[fidx][1]
+        counts[label] += 1.0
+    counts[counts == 0.0] = 1.0  # avoid div-by-zero
+    inv = 1.0 / counts
+    weights = inv / inv.sum() * n_classes
+    w = torch.tensor(weights, dtype=torch.float32)
+    log.info(f"class window counts: {counts.tolist()}  -> loss weights: {weights.tolist()}")
+    return w
+
+# -------------------------
+# Train & Eval
+# -------------------------
+def train_one_epoch(model, loader, optim, device, epoch_idx: int, loss_fn):
     model.train()
-    loss_fn = nn.CrossEntropyLoss()
     total_loss, correct, total = 0.0, 0, 0
     skipped_batches = 0
     bad_batches_logged = 0
@@ -244,9 +342,8 @@ def train_one_epoch(model, loader, optim, device, epoch_idx: int):
     return avg_loss, acc, skipped_batches
 
 @torch.no_grad()
-def evaluate(model, loader, device, epoch_idx: int):
+def evaluate(model, loader, device, epoch_idx: int, loss_fn):
     model.eval()
-    loss_fn = nn.CrossEntropyLoss()
     total_loss, correct, total = 0.0, 0, 0
     skipped_batches = 0
 
@@ -286,24 +383,27 @@ def main():
         log_exc("download_s3_prefix", e)
         raise
 
-    # 2) Prepare dataset
+    # 2) Classes (your 6 security sounds)
     classes = [
-        
-        "siren","alarms",
-        "domestic","gunfire","police","forced_entry"
+        "siren", "alarms",
+        "domestic", "gunfire", "police", "forced_entry"
     ]
 
-    try:
-        ds = UrbanSoundDataset(LOCAL_DIR, classes)
-    except Exception as e:
-        log_exc("dataset_init", e)
-        raise
-
-    n = len(ds)
-    train_size = int(n * 0.8)
-    val_size = n - train_size
-    log.info(f"Splitting dataset: total={n} -> train={train_size}, val={val_size}")
-    train_ds, val_ds = torch.utils.data.random_split(ds, [train_size, val_size])
+    # 3) Datasets (full-coverage windows)
+    train_ds = CoverageWindowDataset(
+        LOCAL_DIR, classes,
+        seconds=TARGET_SECONDS,
+        stride_sec=COVERAGE_STRIDE_SEC,
+        split="train",
+        aug_enable=AUG_ENABLE
+    )
+    val_ds = CoverageWindowDataset(
+        LOCAL_DIR, classes,
+        seconds=TARGET_SECONDS,
+        stride_sec=COVERAGE_STRIDE_SEC_VAL,
+        split="val",
+        aug_enable=False
+    )
 
     train_loader = DataLoader(
         train_ds, batch_size=BATCH_SIZE, shuffle=True,
@@ -314,32 +414,31 @@ def main():
         num_workers=NUM_WORKERS, collate_fn=collate_skip_bad, pin_memory=True
     )
 
-    # 3) Model setup
+    # 4) Model setup
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = AudioCNN(n_classes=len(classes)).to(device)
+
+    # class-imbalance handling
+    class_weights = compute_class_weights_from_windows(train_ds, len(classes)).to(device)
+
+    loss_fn = nn.CrossEntropyLoss(weight=class_weights)
     optim  = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    # 4) Train loop (robust + chatty)
+    # 5) Train loop (robust + chatty)
     best_acc, best_path = 0.0, MODEL_DIR / "model.pt"
     for epoch in range(1, EPOCHS + 1):
-        tr_loss, tr_acc, tr_skipped = train_one_epoch(model, train_loader, optim, device, epoch)
-        va_loss, va_acc, va_skipped = evaluate(model, val_loader, device, epoch)
+        tr_loss, tr_acc, tr_skipped = train_one_epoch(model, train_loader, optim, device, epoch, loss_fn)
+        va_loss, va_acc, va_skipped = evaluate(model, val_loader, device, epoch, loss_fn)
 
         log.info(f"[{epoch}/{EPOCHS}] "
                  f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} skipped={tr_skipped} | "
                  f"val_loss={va_loss:.4f} val_acc={va_acc:.4f} skipped={va_skipped}")
 
-        # Persist list of bad files each epoch (so you can grab from CloudWatch or model dir)
+        # Persist list of bad files (if any)
         try:
-            if hasattr(train_ds.dataset, "bad_files") and train_ds.dataset.bad_files:
-                with BAD_FILE_LOG.open("w") as f:
-                    for p in sorted(set(train_ds.dataset.bad_files)):
-                        f.write(f"{p}\n")
-                if len(train_ds.dataset.bad_files) > MAX_BAD_FILES_BEFORE_WARN:
-                    log.warning(f"Many bad files detected: {len(train_ds.dataset.bad_files)} "
-                                f"(see {BAD_FILE_LOG})")
-                else:
-                    log.info(f"Bad files so far: {len(train_ds.dataset.bad_files)} (written to {BAD_FILE_LOG})")
+            # train_ds is CoverageWindowDataset; the underlying file list is train_ds.files
+            # (we don't collect per-file failures here since we return None per bad window)
+            pass
         except Exception as e:
             log_exc("write_bad_file_log", e)
 
@@ -351,7 +450,7 @@ def main():
             except Exception as e:
                 log_exc("save_model", e)
 
-    # 5) Save classes
+    # 6) Save classes
     try:
         with open(MODEL_DIR / "classes.json", "w") as f:
             json.dump(classes, f)
@@ -365,5 +464,5 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         log_exc("FATAL", e)
-        # Re-raise to mark job as failed (so CI/CD surfaces it), but with logs intact
         raise
+
