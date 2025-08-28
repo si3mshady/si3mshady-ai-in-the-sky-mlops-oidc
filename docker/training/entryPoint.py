@@ -27,14 +27,14 @@ def log_exc(context: str, exc: BaseException):
     tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
     log.error(f"[EXCEPTION] {context} :: {exc.__class__.__name__}: {exc}\n{tb}", extra={"context": context})
 # -------------------------
-# Config via env - UPDATED SETTINGS
+# Config via env
 # -------------------------
 BUCKET     = os.environ.get("S3_TRAIN_BUCKET", "urbansound-mlops-56423506")
 PREFIX     = os.environ.get("S3_TRAIN_PREFIX", "training/").rstrip("/") + "/"
 LOCAL_DIR  = Path("/opt/ml/input/data/training")
 MODEL_DIR  = Path(os.environ.get("SM_MODEL_DIR", "/opt/ml/model"))
-EPOCHS     = int(os.environ.get("EPOCHS", "40"))          # CHANGED: 40 epochs
-BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))       # CHANGED: batch size 2
+EPOCHS     = int(os.environ.get("EPOCHS", "40"))      # CHANGED: 40 epochs
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "2"))   # CHANGED: batch size 2
 NUM_WORKERS = int(os.environ.get("NUM_WORKERS", "2"))   # set 0 for maximal tracebacks
 MAX_BAD_BATCHES_TO_LOG = int(os.environ.get("MAX_BAD_BATCHES_TO_LOG", "50"))
 MAX_BAD_FILES_BEFORE_WARN = int(os.environ.get("MAX_BAD_FILES_BEFORE_WARN", "50"))
@@ -124,7 +124,7 @@ def load_audio_mono(path: Path, sr: int = SR) -> np.ndarray:
     if file_sr != sr:
         y = librosa.resample(y, orig_sr=file_sr, target_sr=sr)
     return y.astype(np.float32)
-# FIXED: Global normalization function
+# ONLY CHANGE: Fixed normalization function
 def to_logmel(y: np.ndarray) -> np.ndarray:
     if len(y) < TARGET_SAMPLES:
         y = np.pad(y, (0, TARGET_SAMPLES - len(y)))
@@ -136,6 +136,7 @@ def to_logmel(y: np.ndarray) -> np.ndarray:
     S_db = librosa.power_to_db(S, ref=np.max)
     
     # FIXED: Global normalization instead of per-sample min-max
+    # Use consistent global constants based on typical mel-spectrogram ranges
     GLOBAL_MIN = -80.0  # Typical minimum dB value for audio
     GLOBAL_MAX = 0.0    # Typical maximum dB value for audio
     S_norm = (S_db - GLOBAL_MIN) / (GLOBAL_MAX - GLOBAL_MIN)
@@ -265,7 +266,7 @@ def collate_skip_bad(batch):
     Y = torch.stack(Ys, dim=0)
     return X, Y
 # -------------------------
-# Class weights for imbalance - KEPT for your data imbalance
+# Class weights for imbalance
 # -------------------------
 def compute_class_weights_from_windows(ds: CoverageWindowDataset, n_classes: int) -> torch.Tensor:
     counts = np.zeros(n_classes, dtype=np.float64)
@@ -305,7 +306,7 @@ def train_one_epoch(model, loader, optim, device, epoch_idx: int, loss_fn):
             preds = logits.argmax(dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
-            if step % 50 == 0:  # Less frequent logging due to more steps
+            if step % 50 == 0:  # Reduced logging frequency due to more steps
                 log.info(f"[E{epoch_idx} S{step}] loss={loss.item():.4f} bs={y.size(0)} accumulated_total={total}")
         except Exception as e:
             log_exc(f"train_step_error (epoch={epoch_idx}, step={step})", e)
@@ -382,12 +383,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model  = AudioCNN(n_classes=len(classes)).to(device)
     
-    # CHANGED: Simple loss without class weights to test first
+    # CHANGED: Simple loss function (no class weights)
     loss_fn = nn.CrossEntropyLoss()
-    log.info("Using simple CrossEntropyLoss (no class weights)")
+    log.info("Using simple CrossEntropyLoss without class weights")
     
-    # CHANGED: Lower learning rate 
-    optim = torch.optim.Adam(model.parameters(), lr=1e-4)  # 10x lower than before
+    # Keep lower learning rate from your working version
+    optim = torch.optim.Adam(model.parameters(), lr=1e-4)  # 10x lower
     log.info("Using learning rate 1e-4")
     
     # 5) Train loop (robust + chatty)
