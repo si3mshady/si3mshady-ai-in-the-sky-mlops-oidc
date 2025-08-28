@@ -30,12 +30,12 @@ DURATION = 4.0
 N_MELS = 128
 DEVICE = "cpu"
 
+
+
+
 # 🔒 Hard-coded 17 classes; do NOT auto-load from classes.json
-CLASS_NAMES = [
-    "air_conditioner","car_horn","children_playing","dog_bark","drilling",
-    "engine_idling","gun_shot","jackhammer","siren","street_music",
-    "alarms","crowd","domestic","gunfire","police","grinding","forced_entry"
-]
+CLASS_NAMES = [ "siren","alarms",
+        "domestic","gunfire","police","forced_entry"]
 
 MODEL: Optional[torch.nn.Module] = None
 

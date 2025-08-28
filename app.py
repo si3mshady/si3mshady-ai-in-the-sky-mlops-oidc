@@ -1,29 +1,25 @@
-# streamlit_audio_tester.py
+# streamlit_app.py
 import os, io, json, time, base64, traceback
-from typing import List, Optional
-
 import streamlit as st
 import boto3
-
-# Optional deps for preview/convert
 import numpy as np
 import soundfile as sf
 import librosa
 import matplotlib.pyplot as plt
 
-st.set_page_config(page_title="🎧 Audio Classifier — SageMaker Test Console",
-                   page_icon="🎧", layout="centered")
-
-st.title("🎧 Audio Classifier — SageMaker Test Console")
-st.caption("Upload audio, send it to your SageMaker endpoint, and inspect predictions.")
-
-# ✅ Updated classes
-CUSTOM_CLASSES: List[str] = [
+# --- Class list (fallback if endpoint doesn't return classes) ---
+CLASSES = [
     "air_conditioner","car_horn","children_playing","dog_bark","drilling",
-    "engine_idling","gun_shot","jackhammer","siren","street_music","alarms","crowd",
-    "domestic","gunfire","police","grinding","forced_entry"
+    "engine_idling","gun_shot","jackhammer","siren","street_music",
+    "alarms","crowd","domestic","gunfire","police","grinding","forced_entry"
 ]
 
+# --- Page setup ---
+st.set_page_config(page_title="🎧 UrbanSound — Endpoint Tester", page_icon="🎧", layout="centered")
+st.title("🎧 UrbanSound — SageMaker Endpoint Tester")
+st.caption("Upload a clip → send to your SageMaker endpoint → see top prediction and probabilities.")
+
+# --- Sidebar controls ---
 DEFAULT_ENDPOINT = os.getenv("ENDPOINT_NAME", "urbansound-audio-staging")
 DEFAULT_REGION   = os.getenv("AWS_REGION", os.getenv("AWS_DEFAULT_REGION", "us-east-2"))
 DEFAULT_KEY      = os.getenv("PAYLOAD_KEY", "audio")
@@ -31,24 +27,18 @@ DEFAULT_KEY      = os.getenv("PAYLOAD_KEY", "audio")
 with st.sidebar:
     st.header("⚙️ Settings")
     endpoint = st.text_input("Endpoint name", value=DEFAULT_ENDPOINT)
-    region   = st.text_input("AWS region", value=DEFAULT_REGION)
+    region   = st.text_input("AWS region",    value=DEFAULT_REGION)
     payload_fmt = st.radio("Payload format", ["JSON (base64)", "Binary (octet-stream)"], index=0)
     json_key = st.text_input("JSON key (when JSON)", value=DEFAULT_KEY)
-    send_mode = st.selectbox(
-        "Preprocess before sending",
-        ["Raw file bytes", "Resampled mono 22.05 kHz WAV"],
-        index=1
-    )
-    st.caption("Match your serving container expectations.")
-    st.markdown("---")
-    use_custom = st.checkbox("Use custom classes (override)", value=False,
-                             help="Force the legend to the list above if the endpoint doesn't return 'classes'.")
-    if use_custom:
-        st.write("Classes used:")
-        for c in CUSTOM_CLASSES:
-            st.markdown(f"- {c}")
+    send_mode = st.selectbox("Preprocess before sending",
+                             ["Raw file bytes", "Resampled mono 22.05 kHz WAV"],
+                             index=1)
+    topk = st.slider("Top-K to show", 3, min(10, len(CLASSES)), 7)
+    st.markdown("**Class legend**")
+    st.write(", ".join(CLASSES))
 
-def _to_resampled_wav_bytes(raw_bytes: bytes, target_sr: int = 22050) -> bytes:
+# --- Helpers ---
+def to_resampled_wav_bytes(raw_bytes: bytes, target_sr: int = 22050) -> bytes:
     y, sr = librosa.load(io.BytesIO(raw_bytes), sr=None, mono=True)
     if sr != target_sr:
         y = librosa.resample(y, orig_sr=sr, target_sr=target_sr)
@@ -57,12 +47,13 @@ def _to_resampled_wav_bytes(raw_bytes: bytes, target_sr: int = 22050) -> bytes:
     buf.seek(0)
     return buf.read()
 
-def _show_mel(raw_bytes: bytes):
+def show_mel(raw_bytes: bytes):
     try:
         y, sr = librosa.load(io.BytesIO(raw_bytes), sr=None, mono=True)
-        y_plot = librosa.resample(y, orig_sr=sr, target_sr=22050) if sr != 22050 else y
-        S = librosa.feature.melspectrogram(y=y_plot, sr=22050, n_mels=128,
-                                           n_fft=2048, hop_length=512, power=2.0)
+        if sr != 22050:
+            y = librosa.resample(y, orig_sr=sr, target_sr=22050)
+            sr = 22050
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128, n_fft=2048, hop_length=512, power=2.0)
         S_db = librosa.power_to_db(S, ref=np.max)
         fig, ax = plt.subplots()
         ax.imshow(S_db, origin="lower", aspect="auto")
@@ -72,56 +63,38 @@ def _show_mel(raw_bytes: bytes):
     except Exception as e:
         st.info(f"Could not render spectrogram: {e}")
 
-def _plot_top_probs(classes: List[str], probs: List[float], k: int = 8):
-    try:
-        idx = np.argsort(probs)[::-1][:k]
-        names = [classes[i] if i < len(classes) else str(i) for i in idx]
-        vals  = [float(probs[i]) for i in idx]
-        fig = plt.figure()
-        plt.barh(range(len(vals)), vals)
-        plt.yticks(range(len(vals)), names)
-        plt.gca().invert_yaxis()
-        plt.xlabel("Probability"); plt.xlim(0, 1)
-        st.pyplot(fig, clear_figure=True)
-    except Exception as e:
-        st.info(f"Could not plot probabilities: {e}")
+def plot_topk(classes, probs, k):
+    idx = np.argsort(probs)[::-1][:k]
+    names = [classes[i] if i < len(classes) else str(i) for i in idx]
+    vals  = [float(probs[i]) for i in idx]
+    fig = plt.figure()
+    plt.barh(range(len(vals)), vals)
+    plt.yticks(range(len(vals)), names)
+    plt.gca().invert_yaxis()
+    plt.xlabel("Probability"); plt.xlim(0, 1)
+    st.pyplot(fig, clear_figure=True)
 
-def _pretty_card(label: str, prob: Optional[float] = None):
-    st.markdown(
-        f"""
-        <div style="
-          border-radius:18px;padding:18px 20px;
-          background:linear-gradient(135deg,#7c3aed 0%, #0ea5e9 45%, #10b981 100%);
-          color:white;text-align:center;box-shadow:0 8px 28px rgba(0,0,0,0.18);">
-          <div style="font-size:28px;font-weight:800;letter-spacing:0.3px;">{label}</div>
-          <div style="font-size:18px;opacity:0.95;margin-top:6px;">
-            {'' if prob is None else f'{prob:.1%} confidence'}
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
+# --- UI: upload & preview ---
 file = st.file_uploader("Upload audio", type=["wav","mp3","ogg","flac","m4a","aiff","aif"])
-
-if file is not None:
+if file:
     raw = file.read()
     st.audio(raw)
-    with st.expander("Preview features (optional)", expanded=False):
-        _show_mel(raw)
+    with st.expander("Preview spectrogram", expanded=False):
+        show_mel(raw)
 else:
     st.info("Waiting for an audio file…")
 
-if st.button("Predict 🚀", type="primary", disabled=file is None):
+# --- Predict ---
+if st.button("Predict 🚀", type="primary", disabled=(file is None)):
     try:
-        to_send = raw if send_mode == "Raw file bytes" else _to_resampled_wav_bytes(raw, 22050)
+        body_bytes = raw if send_mode == "Raw file bytes" else to_resampled_wav_bytes(raw, 22050)
         rt = boto3.client("sagemaker-runtime", region_name=region or None)
 
         if payload_fmt.startswith("JSON"):
-            payload      = json.dumps({json_key: base64.b64encode(to_send).decode("ascii")}).encode("utf-8")
+            payload = json.dumps({json_key: base64.b64encode(body_bytes).decode("ascii")}).encode("utf-8")
             content_type = "application/json"
         else:
-            payload      = to_send
+            payload = body_bytes
             content_type = "application/octet-stream"
 
         with st.spinner("Calling endpoint…"):
@@ -136,40 +109,41 @@ if st.button("Predict 🚀", type="primary", disabled=file is None):
         try:
             parsed = json.loads(body)
         except Exception:
-            parsed = None
+            pass
 
         if isinstance(parsed, dict):
-            classes = parsed.get("classes") or parsed.get("labels") or parsed.get("class_names")
-            probs   = parsed.get("probs")   or parsed.get("scores") or parsed.get("probabilities")
-            label   = parsed.get("label")   or parsed.get("prediction")
+            # Prefer server-provided classes; fallback to our CLASSES
+            srv_classes = parsed.get("classes") or parsed.get("labels") or parsed.get("class_names")
+            classes = srv_classes if (isinstance(srv_classes, list) and len(srv_classes) > 0) else CLASSES
+            probs = parsed.get("probs") or parsed.get("scores") or parsed.get("probabilities")
+            label = parsed.get("label") or parsed.get("prediction")
 
-            if use_custom and probs is not None:
-                classes = CUSTOM_CLASSES
-
-            if probs is not None and classes is not None and len(classes) >= len(probs):
-                top_idx  = int(np.argmax(probs))
-                top_lab  = classes[top_idx]
-                top_prob = float(probs[top_idx])
-                _pretty_card(top_lab, top_prob)
-                if top_prob >= 0.85:
-                    st.balloons()
+            if probs is not None and isinstance(probs, (list, tuple)) and len(probs) > 0:
+                probs = np.asarray(probs, dtype=float)
+                top = int(np.argmax(probs))
+                top_label = classes[top] if top < len(classes) else str(top)
+                top_prob  = float(probs[top])
+                st.success(f"Top-1: **{top_label}** ({top_prob:.1%})")
                 with st.expander("Top probabilities", expanded=True):
-                    _plot_top_probs(classes, probs, k=min(8, len(probs)))
+                    plot_topk(classes, probs, k=min(topk, len(probs)))
                 with st.expander("Raw JSON response", expanded=False):
                     st.json(parsed)
             elif label is not None:
-                _pretty_card(label)
+                st.success(f"Prediction: **{label}**")
                 with st.expander("Raw JSON response", expanded=False):
                     st.json(parsed)
             else:
                 st.subheader("JSON response")
                 st.json(parsed)
         else:
+            # Not JSON → show text/bytes
             try:
                 txt = body.decode("utf-8", errors="ignore")
-                st.subheader("Raw text response"); st.code(txt)
+                st.subheader("Raw text response")
+                st.code(txt)
             except Exception:
-                st.subheader("Raw bytes response"); st.write(body)
+                st.subheader("Raw bytes response")
+                st.write(body)
 
     except Exception as e:
         st.error(f"Invoke failed: {e}")
