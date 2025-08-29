@@ -13,7 +13,25 @@ import librosa
 import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader
-from models.audio_cnn import AudioCNN  # unchanged
+from models.audio_cnn import AudioCNN
+
+# COMET.ML INTEGRATION
+from comet_ml import start
+from comet_ml.integration.pytorch import log_model
+
+# Initialize Comet.ml experiment
+try:
+    experiment = start(
+        api_key="HWLvI1jEiUmr7TQBV3NIMArk4",
+        project_name="audio-detection",
+        workspace="cloudscience"
+    )
+    COMET_ENABLED = True
+except Exception as e:
+    print(f"Warning: Comet.ml initialization failed: {e}")
+    experiment = None
+    COMET_ENABLED = False
+
 # -------------------------
 # Logging (very verbose)
 # -------------------------
@@ -66,7 +84,7 @@ def print_env_banner():
     except Exception:
         pkgs = {}
     log.info("========== ENV / VERSIONS ==========")
-    log.info(f"Python: {sys.version.splitlines()}")
+    log.info(f"Python: {sys.version.splitlines()[0]}")
     log.info(f"PyTorch: {torch.__version__} | CUDA available: {torch.cuda.is_available()} | device_count={torch.cuda.device_count()}")
     log.info(f"NumPy: {np.__version__} | librosa: {librosa.__version__}")
     try:
@@ -78,6 +96,7 @@ def print_env_banner():
     log.info(f"EPOCHS={EPOCHS}  BATCH_SIZE={BATCH_SIZE}  NUM_WORKERS={NUM_WORKERS}  TARGET_SECONDS={TARGET_SECONDS}")
     log.info(f"COVERAGE_STRIDE_SEC={COVERAGE_STRIDE_SEC}  COVERAGE_STRIDE_SEC_VAL={COVERAGE_STRIDE_SEC_VAL}")
     log.info(f"AUG_ENABLE={AUG_ENABLE} Fmasks={AUG_FREQ_MASKS} Fpct={AUG_FREQ_PCT} Tmasks={AUG_TIME_MASKS} Tpct={AUG_TIME_PCT}")
+    log.info(f"Comet.ml enabled: {COMET_ENABLED}")
     log.info("Some installed packages: " + ", ".join(sorted([f"{k}={v}" for k,v in list(pkgs.items())[:30]])))
     log.info("====================================")
 
@@ -165,7 +184,6 @@ def spec_augment_np(mel: np.ndarray,
         m[:, t0:t0 + w] = 0.0
     return m
 
-# [REST OF YOUR CODE UNCHANGED - CoverageWindowDataset, collate functions, etc.]
 class CoverageWindowDataset(Dataset):
     def __init__(self, root: Path, classes: List[str],
                  seconds: float = TARGET_SECONDS,
@@ -266,7 +284,7 @@ def collate_skip_bad(batch):
 def compute_class_weights_from_windows(ds: CoverageWindowDataset, n_classes: int) -> torch.Tensor:
     counts = np.zeros(n_classes, dtype=np.float64)
     for fidx, _ in ds.index:
-        label = ds.files[fidx][13]
+        label = ds.files[fidx][1]  # FIXED: was [13], should be [1]
         counts[label] += 1.0
     counts[counts == 0.0] = 1.0
     inv = 1.0 / counts
@@ -299,6 +317,12 @@ def train_one_epoch(model, loader, optim, device, epoch_idx: int, loss_fn):
             preds = logits.argmax(dim=1)
             correct += (preds == y).sum().item()
             total += y.size(0)
+            
+            # LOG BATCH METRICS TO COMET.ML
+            if COMET_ENABLED and step % 10 == 0:
+                global_step = step + (epoch_idx - 1) * len(loader)
+                experiment.log_metric("batch_loss", loss.item(), step=global_step)
+            
             if step % 50 == 0:  # Less frequent logging
                 log.info(f"[E{epoch_idx} S{step}] loss={loss.item():.4f} bs={y.size(0)} total={total}")
         except Exception as e:
@@ -348,6 +372,26 @@ def main():
         "tires", "glass_shatter"
     ]
     
+    # LOG HYPERPARAMETERS TO COMET.ML
+    if COMET_ENABLED:
+        hyper_params = {
+            "learning_rate": 1e-4,
+            "batch_size": BATCH_SIZE,
+            "epochs": EPOCHS,
+            "target_seconds": TARGET_SECONDS,
+            "coverage_stride_sec": COVERAGE_STRIDE_SEC,
+            "aug_enable": AUG_ENABLE,
+            "aug_freq_masks": AUG_FREQ_MASKS,
+            "aug_time_masks": AUG_TIME_MASKS,
+            "aug_freq_pct": AUG_FREQ_PCT,
+            "aug_time_pct": AUG_TIME_PCT,
+            "n_classes": len(classes),
+            "sample_rate": SR,
+            "model_architecture": "AudioCNN"
+        }
+        experiment.log_parameters(hyper_params)
+        experiment.log_other("classes", classes)
+    
     train_ds = CoverageWindowDataset(
         LOCAL_DIR, classes,
         seconds=TARGET_SECONDS,
@@ -387,6 +431,16 @@ def main():
     for epoch in range(1, EPOCHS + 1):
         tr_loss, tr_acc, tr_skipped = train_one_epoch(model, train_loader, optim, device, epoch, loss_fn)
         va_loss, va_acc, va_skipped = evaluate(model, val_loader, device, epoch, loss_fn)
+        
+        # LOG EPOCH METRICS TO COMET.ML
+        if COMET_ENABLED:
+            experiment.log_metric("train_loss", tr_loss, step=epoch)
+            experiment.log_metric("train_accuracy", tr_acc, step=epoch)
+            experiment.log_metric("val_loss", va_loss, step=epoch)
+            experiment.log_metric("val_accuracy", va_acc, step=epoch)
+            experiment.log_metric("train_skipped_batches", tr_skipped, step=epoch)
+            experiment.log_metric("val_skipped_batches", va_skipped, step=epoch)
+        
         log.info(f"[{epoch}/{EPOCHS}] "
                  f"train_loss={tr_loss:.4f} train_acc={tr_acc:.4f} skipped={tr_skipped} | "
                  f"val_loss={va_loss:.4f} val_acc={va_acc:.4f} skipped={va_skipped}")
@@ -396,6 +450,11 @@ def main():
             try:
                 torch.save(model.state_dict(), best_path)
                 log.info(f"New best model saved: acc={best_acc:.4f} -> {best_path}")
+                
+                # LOG BEST ACCURACY TO COMET.ML
+                if COMET_ENABLED:
+                    experiment.log_metric("best_val_accuracy", best_acc)
+                    
             except Exception as e:
                 log_exc("save_model", e)
     
@@ -404,6 +463,12 @@ def main():
             json.dump(classes, f)
     except Exception as e:
         log_exc("save_classes_json", e)
+    
+    # LOG FINAL MODEL TO COMET.ML
+    if COMET_ENABLED:
+        log_model(experiment, model=model, model_name="TiresGlassShatterModel")
+        experiment.log_metric("final_best_accuracy", best_acc)
+        experiment.end()
     
     log.info(f"Training complete. Best val_acc={best_acc:.4f}. Model saved to {best_path}")
 
