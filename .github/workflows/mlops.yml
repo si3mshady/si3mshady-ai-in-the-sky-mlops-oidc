@@ -1,7 +1,9 @@
 name: "UrbanSound • SageMaker OIDC MLOps"
+
 permissions:
   id-token: write
   contents: read
+
 on:
   push:
     branches: [ main, develop ]
@@ -23,6 +25,7 @@ on:
       serve_instance_type:
         description: "SageMaker Inference InstanceType"
         default: "ml.g4dn.xlarge"
+
 env:
   AWS_REGION: us-east-2
   AWS_ACCOUNT_ID: "564230509626"
@@ -33,9 +36,11 @@ env:
   OIDC_ROLE_ARN: arn:aws:iam::564230509626:role/urbansound-github-actions-v2
   ENDPOINT_NAME_BASE: urbansound-audio
   PYTHON_VERSION: "3.11"
+
 concurrency:
   group: mlops-${{ github.ref }}
   cancel-in-progress: false
+
 jobs:
   build-and-push-images:
     name: Build & Push (ECR)
@@ -45,19 +50,24 @@ jobs:
       INFER_IMAGE_TAG:     ${{ steps.out-infer.outputs.INFER_IMAGE_TAG }}
       TRAIN_IMAGE_DIGEST:  ${{ steps.digest-train.outputs.TRAIN_IMAGE_DIGEST }}
       INFER_IMAGE_DIGEST:  ${{ steps.digest-infer.outputs.INFER_IMAGE_DIGEST }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Docker Buildx
         uses: docker/setup-buildx-action@v3
+
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
+
       - name: ECR Login
         uses: aws-actions/amazon-ecr-login@v2
+
       - name: Build & Push TRAIN image
         id: build-train
         uses: docker/build-push-action@v6
@@ -72,6 +82,7 @@ jobs:
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.TRAIN_ECR_REPOSITORY }}:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
+
       - name: Build & Push INFER image
         id: build-infer
         uses: docker/build-push-action@v6
@@ -86,18 +97,21 @@ jobs:
             ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.INFER_ECR_REPOSITORY }}:latest
           build-args: |
             GIT_SHA=${{ github.sha }}
+
       - name: Output TRAIN tag URI
         id: out-train
         shell: bash
         run: |
           set -euo pipefail
           echo "TRAIN_IMAGE_TAG=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${TRAIN_ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Output INFER tag URI
         id: out-infer
         shell: bash
         run: |
           set -euo pipefail
           echo "INFER_IMAGE_TAG=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${INFER_ECR_REPOSITORY}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
       - name: Resolve TRAIN image digest
         id: digest-train
         shell: bash
@@ -109,6 +123,7 @@ jobs:
             --query 'imageDetails[0].imageDigest' --output text)
           FULL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${TRAIN_ECR_REPOSITORY}@${DIGEST}"
           printf "TRAIN_IMAGE_DIGEST=%s\n" "$FULL" >> "$GITHUB_OUTPUT"
+
       - name: Resolve INFER image digest
         id: digest-infer
         shell: bash
@@ -120,6 +135,7 @@ jobs:
             --query 'imageDetails[0].imageDigest' --output text)
           FULL="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${INFER_ECR_REPOSITORY}@${DIGEST}"
           printf "INFER_IMAGE_DIGEST=%s\n" "$FULL" >> "$GITHUB_OUTPUT"
+
       - name: "Guardrail: training and inference are different images"
         shell: bash
         run: |
@@ -128,36 +144,43 @@ jobs:
             echo "Train and Infer images share the same digest. Aborting."
             exit 1
           fi
+
+
   sagemaker-train-and-deploy:
     name: Train & Deploy (SageMaker)
     needs: build-and-push-images
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+
       - name: Install deps
-        run: |
-          pip install boto3 botocore pyyaml
-          pip install comet_ml
+        run: pip install boto3 botocore pyyaml
+
       - name: Configure AWS (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.OIDC_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           role-skip-session-tagging: true
+
       - name: Train + (Re)Deploy Endpoint
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
           S3_BUCKET: ${{ env.S3_BUCKET }}
           SAGEMAKER_EXECUTION_ROLE_ARN: ${{ env.SAGEMAKER_EXECUTION_ROLE_ARN }}
           ENDPOINT_NAME_BASE: ${{ env.ENDPOINT_NAME_BASE }}
+
           # *** PIN TO DIGESTS ***
           TRAIN_IMAGE_URI: ${{ needs.build-and-push-images.outputs.TRAIN_IMAGE_DIGEST }}
           INFER_IMAGE_URI: ${{ needs.build-and-push-images.outputs.INFER_IMAGE_DIGEST }}
+
           FORCE_RETRAIN: ${{ github.event.inputs.force_retrain || 'false' }}
           INSTANCE_TYPE: ${{ github.event.inputs.train_instance_type || 'ml.m5.large' }}
           SERVE_INSTANCE_TYPE: ${{ github.event.inputs.serve_instance_type || 'ml.g4dn.xlarge' }}
@@ -176,3 +199,4 @@ jobs:
             --serve-instance "$SERVE_INSTANCE_TYPE" \
             --env "$ENDPOINT_ENV" \
             --git-sha "$GIT_SHA"
+
