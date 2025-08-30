@@ -369,7 +369,7 @@ def main():
         raise
     
     classes = [
-        "tires", "glass_shatter"
+        "tires", "glass_shatter","toilet"
     ]
     
     # LOG HYPERPARAMETERS TO COMET.ML

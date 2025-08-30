@@ -45,7 +45,7 @@ class AudioCNN(nn.Module):
 # ---------- App ----------
 app = Flask(__name__)
 MODEL: nn.Module = None  # type: ignore
-CLASS_NAMES: List[str] = [ "tires", "glass_shatter"]
+CLASS_NAMES: List[str] = [ "tires", "glass_shatter","toilet"]
 def log(msg: str): print(msg, flush=True)
 def _load_classes():
     global CLASS_NAMES
